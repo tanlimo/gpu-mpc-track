@@ -137,8 +137,8 @@ public:
     //  * A_hat, maskTiled : P1's drug-graph secrets.
     //  * proteinEmb       : P2's public GatedCNN output injected as a share.
     // GCN biases fold into P2's private FC weights (associativity rewrite in
-    // gcn_layer.h), so no tiled bias leaf is needed. maskTiled carries {0,1} at
-    // the model fixed-point scale (share_data.py).
+    // gcn_layer.h), so no tiled bias leaf is needed. maskTiled carries literal
+    // ring values {0,1} at scale 0; H*mask therefore preserves H's scale.
     // Batched mode: A_hat (B*Nmax x Nmax), maskTiled (B*Nmax x 376), proteinEmb (B x 128).
     Tensor<T> *A_hat       = nullptr;   // single: (Nmax x Nmax), batched: (B*Nmax x Nmax)
     Tensor<T> *maskTiled   = nullptr;   // single: (Nmax x 376), batched: (B*Nmax x 376)

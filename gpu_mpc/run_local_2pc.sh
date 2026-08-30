@@ -39,8 +39,9 @@ if ! compgen -G "${1%/}/*.dat" > /dev/null; then
 fi
 
 # Runtime env required by the binary (CUDA 12.1 on WSL)
-export PATH=~/.local/bin:/usr/local/cuda-12.1/bin:$PATH
-export LD_LIBRARY_PATH=/usr/local/cuda-12.1/lib64:/usr/lib/wsl/lib:${LD_LIBRARY_PATH:-}
+CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
 export DDG_WEIGHTS_BIN="$WEIGHTS_BIN"
 
 # The binary lives alongside this script

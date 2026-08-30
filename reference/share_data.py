@@ -31,6 +31,10 @@ U32_MOD = 1 << 32
 DEFAULT_SCALE = mpc_config.SCALE
 DEFAULT_BW = mpc_config.BW
 
+# Binary node mask is an arithmetic-shared bit tensor.
+# Values are literal ring elements {0,1}, not fixed-point {0,2^scale}.
+MASK_SCALE = 0
+
 
 def _bw_dtype(bw: int):
     """Return (unsigned numpy dtype, signed numpy dtype, ring modulus) for bw."""
@@ -126,7 +130,7 @@ def share_drug_graph(smile: str, out_dir: str,
                                  (nmax, pool_dim))          # (nmax, pool_dim)
     _write_pair(X,          out_dir, "x",    scale, seed + 0, bw=bw)
     _write_pair(A_hat,      out_dir, "adj",  scale, seed + 1, bw=bw)
-    _write_pair(mask_tiled, out_dir, "mask", scale, seed + 2, bw=bw)
-    return {"nmax": nmax, "scale": scale, "pool_dim": pool_dim, "bw": bw,
+    _write_pair(mask_tiled, out_dir, "mask", MASK_SCALE, seed + 2, bw=bw)
+    return {"nmax": nmax, "scale": scale, "mask_scale": MASK_SCALE, "pool_dim": pool_dim, "bw": bw,
             "shapes": {"x": list(X.shape), "adj": list(A_hat.shape),
                        "mask": list(mask_tiled.shape)}}

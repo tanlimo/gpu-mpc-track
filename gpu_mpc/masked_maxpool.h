@@ -16,7 +16,7 @@
 // SHAPE CONTRACTS discovered from sytorch source (layers/layers.h):
 //   * _Mul asserts identical shapes on every axis — NO broadcast. Hence the
 //     mask must arrive pre-tiled to (Nmax x F), not (Nmax x 1). The Python
-//     sharer (share_data.py) emits maskTiled at the model scale.
+//     sharer (share_data.py) emits maskTiled as literal {0,1} ring bits at scale 0.
 //   * View(idx) selects row idx AND erases axis 0, yielding a 1-D (F,) tensor.
 //     The pairwise fold therefore runs on 1-D vectors (add/relu/scalarmul are
 //     all shape-preserving elementwise ops, so this is fine), and we unsqueeze
@@ -68,7 +68,7 @@ struct MaskedGlobalMaxPool
 
     // H:        (Nmax x F) secret post-ReLU GCN features
     // maskTiled: (Nmax x F) secret {0,1} node mask tiled across F channels,
-    //            carrying 1.0 in the same fixed-point scale as H.
+    //            encoded as literal ring values {0,1} at scale 0.
     // Returns (1 x F) graph embedding.
     Tensor<T> &forward(Tensor<T> &H, Tensor<T> &maskTiled)
     {

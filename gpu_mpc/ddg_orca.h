@@ -40,6 +40,11 @@ public:
     }
 
     // ── ADDED: element-wise secret×secret multiply (online eval) ────────────
+// CURRENT DEEPDTAGEN CONTRACT:
+// This _Mul is used only for H(scale=s) * nodeMask(scale=0, values {0,1}).
+// Therefore the output remains at scale=s and no fixed-point truncation is
+// required. If generic scale-s * scale-s elementwise multiplication is added
+// later, it must use a separate truncating path.
     void mul(const Tensor<T> &a, const Tensor<T> &b, Tensor<T> &out) override
     {
         int N = (int)a.size();
@@ -47,7 +52,7 @@ public:
         assert(a.is_same_shape(out) && "mul: output shape mismatch");
 
         // Read Beaver-triple key written by DDGOrcaKeygen::mul
-        auto k = readGPUMulKey<T>(&this->keyBuf, (u64)N, (u64)N, (u64)N, TruncateType::TrWithSlack);
+        auto k = readGPUMulKey<T>(&this->keyBuf, (u64)N, (u64)N, (u64)N, TruncateType::None);
 
         // Reveal leaf operands (e.g. maskTiled in maxpool) to masked-public.
         auto d_mask_a = (T *)moveToGPU((u8 *)k.a, N * sizeof(T), &this->s);
@@ -58,7 +63,7 @@ public:
         gpuFree(d_mask_b);
 
         out.d_data = gpuMul(this->peer, this->party, this->bw, this->scale, N, k,
-                            a.d_data, b.d_data, TruncateType::TrWithSlack,
+                            a.d_data, b.d_data, TruncateType::None,
                             &this->g, &this->s);
     }
 
@@ -174,6 +179,7 @@ public:
     }
 
     // ── ADDED: element-wise secret×secret multiply (keygen) ─────────────────
+// Mirrors eval: node-mask multiplication requires TruncateType::None.
     void mul(const Tensor<T> &a, const Tensor<T> &b, Tensor<T> &out) override
     {
         int N = (int)a.size();
@@ -189,7 +195,7 @@ public:
             N,
             a.d_data,
             b.d_data,
-            TruncateType::TrWithSlack,
+            TruncateType::None,
             &this->g);
     }
 
