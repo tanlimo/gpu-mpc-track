@@ -78,8 +78,8 @@ public:
     void sub(Tensor<T> &b, Tensor<T> &a, Tensor<T> &out)
     {
         // Pure ring subtraction: out = b - a (mod 2^tmpBw), no truncation, no comm.
-        // tmpBw = bw - scale matches Add's modulus (Sigma mode-0 full-32: 32-12=20).
-        int tmpBw = this->bw - this->scale;
+        // Subtraction preserves the fixed-point scale, so operate in the full bw-bit ring.
+        int tmpBw = this->bw;  // Fixed-point subtraction preserves scale: use full ring
         int N = (int)b.size();
         out.d_data = (T *)gpuMalloc(N * sizeof(T));
         gpuLinearComb(tmpBw, N, out.d_data, (T)1, b.d_data, (T)(-1), a.d_data);
@@ -212,8 +212,8 @@ public:
     void sub(Tensor<T> &b, Tensor<T> &a, Tensor<T> &out)
     {
         // No FSS key needed — local linear combination. Mirrors eval exactly.
-        // tmpBw = bw - scale matches Add's modulus semantics.
-        int tmpBw = this->bw - this->scale;
+        // Subtraction preserves the fixed-point scale, so operate in the full bw-bit ring.
+        int tmpBw = this->bw;  // Fixed-point subtraction preserves scale: use full ring
         int N = (int)b.size();
         out.d_data = (T *)gpuMalloc(N * sizeof(T));
         gpuLinearComb(tmpBw, N, out.d_data, (T)1, b.d_data, (T)(-1), a.d_data);

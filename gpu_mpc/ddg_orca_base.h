@@ -295,7 +295,7 @@ public:
 
     void add(const std::vector<Tensor<T> *> &in, Tensor<T> &out)
     {
-        int tmpBw = bw - scale;
+        int tmpBw = bw;  // Fixed-point add preserves scale: use full ring
         int N = in[0]->size();
         std::vector<T *> gpuInp;
         for (int i = 0; i < in.size(); i++)
@@ -485,7 +485,7 @@ public:
 
     void add(const std::vector<Tensor<T> *> &in, Tensor<T> &out)
     {
-        int tmpBw = this->bw - this->scale;
+        int tmpBw = this->bw;  // Fixed-point add preserves scale: use full ring
         int N = in[0]->size();
         std::vector<T *> gpuInp;
         for (int i = 0; i < in.size(); i++)
