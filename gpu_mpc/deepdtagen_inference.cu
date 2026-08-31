@@ -478,6 +478,13 @@ int main(int argc, char *argv[])
                     party,
                     slotRoot.c_str()
                 );
+
+                printf(
+                    "[DeepDTAGen] dealer key slot io=%s\n",
+                    std::getenv("DDG_LEGACY_SLOT_IO")
+                        ? "legacy-direct+fsync"
+                        : "buffered-ephemeral"
+                );
             }
             else {
                 std::string outFile =
@@ -672,7 +679,19 @@ int main(int argc, char *argv[])
 
                     int slotFd = -1;
 
-                    if (std::getenv("DDG_BUFFERED_SLOT_IO")) {
+                    if (std::getenv("DDG_LEGACY_SLOT_IO")) {
+                        // Legacy EzPC path: O_DIRECT.
+                        slotFd =
+                            openForWriting(
+                                tmpFile
+                            );
+                    }
+                    else {
+                        // Bounded key slots are ephemeral producer-consumer
+                        // objects. Use normal buffered I/O so the generated
+                        // key can be handed to the local evaluator through
+                        // the OS page cache instead of forcing every chunk
+                        // through the block device.
                         slotFd = open(
                             tmpFile.c_str(),
                             O_WRONLY |
@@ -687,28 +706,20 @@ int main(int argc, char *argv[])
                             exit(1);
                         }
                     }
-                    else {
-                        slotFd =
-                            openForWriting(
-                                tmpFile
-                            );
-                    }
 
                     chunkKeySize =
                         fss->flushChunk(
                             slotFd
                         );
 
-                    // The bounded slot is an ephemeral producer-consumer
-                    // object.  fsync() provides crash durability, but forces
-                    // the multi-GB FSS key toward persistent storage before
-                    // the evaluator may consume it.
+                    // The bounded slot is consumed immediately and deleted
+                    // after evaluator ACK, so crash durability is unnecessary.
+                    // write completion + close + atomic rename + ready marker
+                    // provide the required producer-consumer ordering.
                     //
-                    // Preserve the original behavior by default.  For the
-                    // transient-slot optimization experiment, allow the
-                    // evaluator to consume the completed closed/renamed file
-                    // directly from the OS page cache.
-                    if (!std::getenv("DDG_SKIP_SLOT_FSYNC")) {
+                    // DDG_LEGACY_SLOT_IO restores the former O_DIRECT+fsync
+                    // behaviour for regression/debugging.
+                    if (std::getenv("DDG_LEGACY_SLOT_IO")) {
                         assert(
                             0 == fsync(slotFd) &&
                             "slot fsync error!"
@@ -744,7 +755,7 @@ int main(int argc, char *argv[])
                     }
 
                     // Only publish ready after the full key has
-                    // been written, fsynced and renamed.
+                    // been written, closed and atomically renamed.
                     ddgCreateMarker(
                         readyFile
                     );
@@ -979,6 +990,13 @@ int main(int argc, char *argv[])
                     party,
                     slotRoot.c_str()
                 );
+
+                printf(
+                    "[DeepDTAGen] evaluator key slot io=%s\n",
+                    std::getenv("DDG_LEGACY_SLOT_IO")
+                        ? "legacy-direct"
+                        : "buffered-ephemeral"
+                );
             }
 
             printf(
@@ -1181,7 +1199,13 @@ int main(int argc, char *argv[])
 
                     int slotFd = -1;
 
-                    if (std::getenv("DDG_BUFFERED_SLOT_IO")) {
+                    if (std::getenv("DDG_LEGACY_SLOT_IO")) {
+                        slotFd =
+                            openForReading(
+                                slotFile
+                            );
+                    }
+                    else {
                         slotFd = open(
                             slotFile.c_str(),
                             O_RDONLY |
@@ -1192,12 +1216,6 @@ int main(int argc, char *argv[])
                             perror("open buffered evaluator key slot");
                             exit(1);
                         }
-                    }
-                    else {
-                        slotFd =
-                            openForReading(
-                                slotFile
-                            );
                     }
 
                     readKey(
