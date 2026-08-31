@@ -485,6 +485,519 @@ Party 1 : public protein representation
 
 so the public representation enters the arithmetic computation without being treated as a confidential protein input.
 
+
+### 8.6 New Dataset Integration Contract
+
+The competition may evaluate the program using an additional dataset that is
+not included in this repository. Therefore it is important to distinguish
+between:
+
+```text
+raw evaluation dataset
+        |
+        v
+input preparation / secret splitting
+        |
+        v
+processed MPC input directory
+        |
+        v
+run_persistent_local.py
+```
+
+#### Raw dataset format
+
+The current Python reference and preparation code follows the DeepDTAGen
+challenge-style CSV format.
+
+The semantically required fields for affinity inference are:
+
+| Column | Required for inference | Meaning |
+|---|---|---|
+| `compound_iso_smiles` | yes | Drug / compound SMILES string |
+| `target_sequence` | yes | Public protein amino-acid sequence |
+| `affinity` | no for inference; used for local validation/evaluation | Ground-truth affinity |
+
+A minimal inference-oriented input CSV may therefore contain:
+
+```csv
+compound_iso_smiles,target_sequence
+CCO...,MKT...
+CCN...,VVK...
+```
+
+For local correctness or accuracy evaluation, the CSV may additionally contain
+the ground-truth affinity:
+
+```csv
+compound_iso_smiles,target_sequence,affinity
+CCO...,MKT...,7.42
+CCN...,VVK...,10.31
+```
+
+Additional columns may also be present. They can be ignored if they are not
+required by the affinity prediction branch.
+
+> **Current helper limitation**
+>
+> `reference/offline_prepare.py` currently reuses the local baseline dataset
+> loader and therefore expects an `affinity` field, even though the affinity
+> value is not mathematically required to perform inference.
+>
+> A final submission-oriented dataset adapter should therefore make
+> `affinity` optional.
+
+---
+
+#### Where the raw dataset may be stored
+
+The raw evaluation dataset does not need to be stored in a hard-coded
+repository directory.
+
+For example, an evaluation CSV may be located at:
+
+```text
+/input/hidden_test.csv
+```
+
+or:
+
+```text
+/data/evaluation/test.csv
+```
+
+The important requirement is that the preparation script receives the correct
+path.
+
+Likewise, the processed MPC input directory may be placed at an arbitrary
+location such as:
+
+```text
+/work/hidden_test/inputs/
+```
+
+The processed directory path is passed directly to:
+
+```text
+gpu_mpc/run_persistent_local.py
+```
+
+as the first positional argument.
+
+For example:
+
+```bash
+python3 gpu_mpc/run_persistent_local.py \
+  /work/hidden_test/inputs \
+  /work/hidden_model/weights.bin \
+  /work/mpc_keys \
+  --num-samples 1000 \
+  --micro-batch 8 \
+  --bw 64 \
+  --scale 12 \
+  --allow-many-chunks
+```
+
+Therefore the inference runtime itself does not depend on a hard-coded dataset
+directory.
+
+---
+
+#### Current per-sample preparation code
+
+The current repository contains:
+
+```text
+reference/offline_prepare.py
+```
+
+with the function:
+
+```python
+prepare_sample(
+    dataset,
+    csv_path,
+    row_idx,
+    out_dir,
+    scale=12,
+    bw=64,
+)
+```
+
+Conceptually, the current helper performs:
+
+```text
+one raw CSV row
+      |
+      v
+prepare_sample(...)
+      |
+      v
+sample_<row_idx>/
+├── x_share0.dat
+├── x_share1.dat
+├── adj_share0.dat
+├── adj_share1.dat
+├── mask_share0.dat
+├── mask_share1.dat
+└── protein_emb.dat
+```
+
+The helper currently performs the main low-level preparation steps required by
+the engineering baseline:
+
+```text
+drug SMILES
+    |
+    v
+drug graph construction
+    |
+    v
+fixed-size dense representation
+    |
+    v
+fixed-point conversion
+    |
+    v
+additive secret splitting
+```
+
+and:
+
+```text
+public protein sequence
+    |
+    v
+plaintext Gated-CNN
+    |
+    v
+protein_emb.dat
+```
+
+---
+
+#### Current persistent-runner input format
+
+The persistent arbitrary-N runner does **not** consume:
+
+```text
+sample_0/
+sample_1/
+sample_2/
+...
+```
+
+as separate directories.
+
+Instead, it expects one **sample-major contiguous input directory**:
+
+```text
+prepared_input/
+├── x_share0.dat
+├── x_share1.dat
+├── adj_share0.dat
+├── adj_share1.dat
+├── mask_share0.dat
+├── mask_share1.dat
+└── protein_emb.dat
+```
+
+Each file contains all samples concatenated in the same order.
+
+For example:
+
+```text
+x_share0.dat
+
+sample 0 X-share
+||
+sample 1 X-share
+||
+sample 2 X-share
+||
+...
+||
+sample N-1 X-share
+```
+
+The same sample ordering must be used in every input file.
+
+Thus:
+
+```text
+record i in x_share0.dat
+record i in x_share1.dat
+record i in adj_share0.dat
+record i in adj_share1.dat
+record i in mask_share0.dat
+record i in mask_share1.dat
+record i in protein_emb.dat
+```
+
+must all refer to the same drug-target pair.
+
+---
+
+#### Current processed input contract
+
+For the current BW64 / SCALE12 pre-compliance baseline, the processed input is:
+
+```text
+private drug input
+    |
+    +-- x_share0.dat
+    +-- x_share1.dat
+    |
+    +-- adj_share0.dat
+    +-- adj_share1.dat
+    |
+    +-- mask_share0.dat
+    +-- mask_share1.dat
+
+public protein input
+    |
+    +-- protein_emb.dat
+```
+
+The current meaning of these files is:
+
+```text
+x_share{0,1}.dat
+    additive shares of the fixed-size drug node-feature matrix X
+
+adj_share{0,1}.dat
+    additive shares of the currently precomputed normalized adjacency A_hat
+
+mask_share{0,1}.dat
+    additive shares of the tiled valid-node mask
+
+protein_emb.dat
+    public 128-dimensional protein representation produced by Gated-CNN
+```
+
+The current persistent runner accepts this processed representation regardless
+of whether the raw dataset was Davis, KIBA, BindingDB, or an additional hidden
+evaluation dataset.
+
+---
+
+#### Processed input validation
+
+Before execution, the runner validates the processed files.
+
+For BW64, the expected dimensions are:
+
+```text
+NMAX       = 138
+FEAT_DIM   = 94
+POOL_DIM   = 376
+PROTEIN    = 128
+element    = 8 bytes
+```
+
+Therefore each sample occupies:
+
+| File | Bytes per sample |
+|---|---:|
+| `x_share0.dat` | 103,776 |
+| `x_share1.dat` | 103,776 |
+| `adj_share0.dat` | 152,352 |
+| `adj_share1.dat` | 152,352 |
+| `mask_share0.dat` | 415,104 |
+| `mask_share1.dat` | 415,104 |
+| `protein_emb.dat` | 1,024 |
+
+The runner checks that:
+
+1. every required file exists;
+2. every file size is divisible by its expected per-sample stride; and
+3. every file contains the same number of samples.
+
+For example, after loading the processed directory the runner may report:
+
+```text
+available N = 10000
+```
+
+A request such as:
+
+```text
+--num-samples 5000
+```
+
+is valid, while:
+
+```text
+--num-samples 12000
+```
+
+is invalid because it exceeds the available processed sample count.
+
+---
+
+#### Current limitation: no final one-command dataset adapter yet
+
+The repository currently contains:
+
+```text
+raw-row preparation logic
++
+secret-sharing logic
++
+protein preparation logic
++
+persistent contiguous-input runtime
+```
+
+but it does **not yet contain a final submission-quality one-command script**
+that converts an arbitrary new raw evaluation CSV directly into the complete
+sample-major persistent-runner directory.
+
+A planned final interface is:
+
+```text
+reference/prepare_dataset.py
+```
+
+with usage conceptually similar to:
+
+```bash
+python3 reference/prepare_dataset.py \
+  --input-csv /input/hidden_test.csv \
+  --output-dir /work/hidden_test \
+  --bw 64 \
+  --scale 12
+```
+
+and expected output:
+
+```text
+/work/hidden_test/
+└── inputs/
+    ├── x_share0.dat
+    ├── x_share1.dat
+    ├── adj_share0.dat
+    ├── adj_share1.dat
+    ├── mask_share0.dat
+    ├── mask_share1.dat
+    └── protein_emb.dat
+```
+
+This final adapter has intentionally not been frozen yet because two parts of
+the input contract are expected to change during the remaining competition
+compliance work.
+
+---
+
+#### Target submission input contract
+
+The current pre-compliance representation contains:
+
+```text
+adj_share{0,1}.dat
+    shares of precomputed A_hat
+```
+
+and:
+
+```text
+protein_emb.dat
+    precomputed public Gated-CNN output
+```
+
+The intended submission-oriented representation is instead conceptually:
+
+```text
+private drug
+    |
+    +-- x_share{0,1}.dat
+    |
+    +-- adj_share{0,1}.dat
+    |       shares of raw/private adjacency A
+    |
+    +-- mask_share{0,1}.dat
+
+public protein
+    |
+    +-- target_sequence
+            or an equivalent lossless encoded public sequence
+```
+
+The corresponding timed execution will become:
+
+```text
+raw secret-shared A
+        |
+        v
+secure online normalization
+        |
+        v
+A_norm
+        |
+        v
+GCN
+```
+
+and:
+
+```text
+public target_sequence
+        |
+        v
+timed plaintext Gated-CNN
+        |
+        v
+128-d protein representation
+        |
+        v
+fusion
+```
+
+Therefore the final `prepare_dataset.py` should be implemented **after**:
+
+1. secure online `A -> A_norm` is completed; and
+2. the public protein Gated-CNN is moved into the timed inference path.
+
+This avoids freezing a dataset-conversion interface that would immediately
+become obsolete.
+
+---
+
+#### Recommended interpretation for a new hidden dataset
+
+When a new evaluation dataset is provided, the intended workflow is:
+
+```text
+new hidden dataset
+        |
+        | compound_iso_smiles
+        | target_sequence
+        | affinity (optional)
+        v
+dataset adapter
+        |
+        +-- validate SMILES
+        +-- validate protein sequence
+        +-- construct fixed-size graph representation
+        +-- fixed-point conversion
+        +-- secret splitting of private drug input
+        +-- serialize public protein input
+        v
+processed MPC input
+        |
+        v
+run_persistent_local.py
+        |
+        v
+continuous affinity predictions
+```
+
+No dataset-specific C++ inference code should be required as long as the new
+dataset follows the same DeepDTAGen input semantics and can be converted into
+the documented fixed-shape MPC representation.
+
+The dataset name itself is not part of the MPC runtime contract.
+
 ---
 
 ## 9. Public Weight Format
@@ -564,6 +1077,815 @@ for each layer:
 ```
 
 This makes it possible to verify the raw binary layout independently.
+
+### 9.3 New Model Weight Integration Contract
+
+The evaluation may use a DeepDTAGen checkpoint different from the checkpoints
+used during local development.
+
+It is therefore important to distinguish between:
+
+```text
+original DeepDTAGen checkpoint
+        |
+        v
+*.pth
+        |
+        +-------------------------------+
+        |                               |
+        v                               v
+MPC weight conversion             public protein model
+        |                               |
+        v                               |
+weights.bin                       Gated-CNN parameters
+weights.bin.json                        |
+        |                               |
+        +---------------+---------------+
+                        |
+                        v
+                    inference
+```
+
+A new model checkpoint does **not** need to be manually converted into C++
+source code as long as it uses the same DeepDTAGen affinity architecture.
+
+---
+
+#### Original checkpoint format
+
+The expected source model is a PyTorch checkpoint:
+
+```text
+*.pth
+```
+
+Existing development checkpoints follow names such as:
+
+```text
+model/deepdtagen_model_davis.pth
+
+model/deepdtagen_model_kiba.pth
+```
+
+The current helper:
+
+```text
+reference/offline_prepare.py
+```
+
+uses the naming convention:
+
+```text
+model/deepdtagen_model_<dataset>.pth
+```
+
+when a dataset name is supplied.
+
+However, the lower-level model loader and exporter do not fundamentally depend
+on this filename.
+
+A new checkpoint may therefore be stored at an arbitrary location, for example:
+
+```text
+/input/models/deepdtagen_model_hidden.pth
+```
+
+or:
+
+```text
+/work/models/new_model.pth
+```
+
+as long as the actual path is passed to the model conversion procedure.
+
+---
+
+#### Compatible checkpoint architecture
+
+The current C++/CUDA model uses a fixed DeepDTAGen affinity architecture.
+
+The expected layer dimensions are:
+
+```text
+Drug GCN
+--------------------------------
+94 -> 188
+188 -> 282
+282 -> 376
+
+
+Drug FC
+--------------------------------
+376 -> 1024
+1024 -> 128
+
+
+Protein representation
+--------------------------------
+128
+
+
+Fusion
+--------------------------------
+256 -> 1024
+1024 -> 512
+512 -> 256
+256 -> 1
+```
+
+The current Python checkpoint loader expects affinity parameters corresponding
+to:
+
+```text
+encoder.GraphConv1
+encoder.GraphConv2
+encoder.GraphConv3
+
+encoder.Drug_FCs.0
+encoder.Drug_FCs.3
+
+fc.FC_layers.0
+fc.FC_layers.3
+fc.FC_layers.6
+fc.FC_layers.9
+```
+
+The public protein Gated-CNN parameters are loaded from checkpoint entries under:
+
+```text
+cnn.*
+```
+
+For GCN layers, the Python loader supports the relevant PyTorch-Geometric
+weight naming variants such as:
+
+```text
+*.lin.weight
+```
+
+and:
+
+```text
+*.weight
+```
+
+depending on the checkpoint / PyG version.
+
+---
+
+#### Same architecture, different numerical weights
+
+If a new checkpoint changes only the trained numerical parameter values while
+keeping the same architecture:
+
+```text
+same GCN layer count
+same GCN dimensions
+same Drug-FC dimensions
+same 128-d protein representation
+same fusion dimensions
+```
+
+then the current implementation can use the new model by regenerating its
+weight artifacts.
+
+In this case:
+
+```text
+C++ model source modification
+    not required
+
+C++ architecture modification
+    not required
+
+new weights.bin
+    required
+
+new protein-model parameters
+    required
+```
+
+The inference binary does not need to contain dataset-specific numerical model
+weights.
+
+---
+
+#### Incompatible architecture changes
+
+The current implementation does **not** automatically support a checkpoint
+whose network topology changes.
+
+Examples include:
+
+```text
+different number of GCN layers
+
+94 -> 256 instead of 94 -> 188
+
+different final GCN dimension
+
+different drug embedding dimension
+
+different protein embedding dimension
+
+additional / removed FC layers
+
+different fusion widths
+```
+
+Such a model would no longer match the statically constructed C++/CUDA model
+and would require corresponding implementation changes before inference.
+
+Therefore:
+
+```text
+new parameter values
+        |
+        v
+re-export only
+```
+
+is supported, while:
+
+```text
+new architecture
+        |
+        v
+C++ / CUDA model adaptation required
+```
+
+is not currently automatic.
+
+---
+
+#### Current model conversion components
+
+The current conversion path uses:
+
+```text
+reference/affinity_model.py
+```
+
+to load the DeepDTAGen checkpoint and:
+
+```text
+reference/export_weights.py
+```
+
+to serialize the MPC-secured layer parameters.
+
+Conceptually:
+
+```text
+new_model.pth
+       |
+       v
+AffinityModel.from_pth(...)
+       |
+       v
+extract:
+    GCN layers
+    Drug FC layers
+    Fusion layers
+       |
+       v
+fixed-point quantization
+       |
+       v
+dump_mpc_weights(...)
+       |
+       +------------------+
+       |                  |
+       v                  v
+weights.bin       weights.bin.json
+```
+
+The currently validated conversion uses:
+
+```text
+BW    = 64
+SCALE = 12
+```
+
+---
+
+#### Exporting a new checkpoint
+
+A compatible checkpoint can currently be converted directly using the existing
+Python APIs.
+
+Example:
+
+```bash
+cd /path/to/gpu-mpc-track
+
+PTH=/input/models/deepdtagen_model_hidden.pth
+OUTDIR=/work/hidden_model
+
+mkdir -p "$OUTDIR"
+
+python3 - "$PTH" "$OUTDIR" <<'PY'
+import sys
+from pathlib import Path
+
+from reference.affinity_model import AffinityModel
+from reference.export_weights import dump_mpc_weights
+
+pth = Path(sys.argv[1]).resolve()
+outdir = Path(sys.argv[2]).resolve()
+
+if not pth.is_file():
+    raise FileNotFoundError(
+        f"checkpoint not found: {pth}"
+    )
+
+outdir.mkdir(
+    parents=True,
+    exist_ok=True,
+)
+
+model = AffinityModel.from_pth(
+    str(pth),
+    device="cpu",
+)
+
+out = outdir / "weights.bin"
+
+manifest = dump_mpc_weights(
+    model,
+    str(out),
+    scale=12,
+)
+
+print("checkpoint =", pth)
+print("weights    =", out)
+print("manifest   =", str(out) + ".json")
+print("scale      =", manifest["scale"])
+print("bitwidth   =", manifest["bitwidth"])
+print("elements   =", manifest["total_elements"])
+PY
+```
+
+Expected output artifacts:
+
+```text
+/work/hidden_model/
+├── weights.bin
+└── weights.bin.json
+```
+
+---
+
+#### Recommended model asset directory
+
+For a new evaluation checkpoint, the recommended directory layout is:
+
+```text
+/work/hidden_model/
+├── model.pth
+├── weights.bin
+└── weights.bin.json
+```
+
+where:
+
+```text
+model.pth
+```
+
+is the original DeepDTAGen checkpoint, and:
+
+```text
+weights.bin
+weights.bin.json
+```
+
+are the MPC-compatible exported artifacts.
+
+The original checkpoint should be retained even after `weights.bin` has been
+created.
+
+---
+
+#### Why the original `.pth` must currently be retained
+
+The MPC `weights.bin` currently contains only the layers executed by the
+MPC-secured affinity path:
+
+```text
+GCN layers
+
+Drug FC layers
+
+Fusion FC layers
+```
+
+It intentionally does **not** contain the public protein Gated-CNN.
+
+The protein encoder parameters remain in the original checkpoint under:
+
+```text
+cnn.*
+```
+
+Therefore a complete new DeepDTAGen model consists conceptually of:
+
+```text
+new checkpoint
+      |
+      +----------------------------+
+      |                            |
+      v                            v
+MPC-secured layers             public Gated-CNN
+      |                            |
+      v                            v
+weights.bin                  protein representation
+      |                            |
+      +-------------+--------------+
+                    |
+                    v
+                  fusion
+```
+
+Using only a new `weights.bin` while continuing to use the protein encoder from
+a different checkpoint would create an inconsistent model.
+
+For example, the following is invalid:
+
+```text
+Davis / old protein Gated-CNN
+        +
+new hidden-model MPC weights
+```
+
+unless those parameters are known to belong to the same trained checkpoint.
+
+---
+
+#### Current pre-compliance protein behavior
+
+In the current engineering baseline:
+
+```text
+model.pth
+    |
+    v
+cnn.* parameters
+    |
+    v
+plaintext Gated-CNN
+    |
+    v
+protein_emb.dat
+```
+
+is performed during data preparation.
+
+Therefore, when using a new checkpoint in the current implementation:
+
+> `protein_emb.dat` must be generated using the same checkpoint from which
+> `weights.bin` was exported.
+
+This requirement is important even though `protein_emb.dat` itself is public.
+
+After the planned compliance modification, the Gated-CNN will run inside the
+timed inference path and the relationship between the original model checkpoint
+and the public protein path will become explicit at runtime.
+
+---
+
+#### Weight binary format
+
+The exported:
+
+```text
+weights.bin
+```
+
+uses the current C++/CUDA weight-loading contract:
+
+```text
+headerless
+little-endian
+signed int64 storage
+fixed-point SCALE=12
+```
+
+The layers are serialized in model forward order:
+
+```text
+GCN layers
+        |
+        v
+Drug FC layers
+        |
+        v
+Fusion FC layers
+```
+
+Each layer stores:
+
+```text
+weight matrix
+followed by
+bias vector
+```
+
+PyTorch linear weights are normally represented as:
+
+```text
+(out_features, in_features)
+```
+
+The exporter transposes them to:
+
+```text
+(in_features, out_features)
+```
+
+before serialization to match the C++/CUDA matrix multiplication convention.
+
+---
+
+#### Weight manifest
+
+Each exported model also contains:
+
+```text
+weights.bin.json
+```
+
+The manifest records metadata such as:
+
+```text
+scale
+
+bitwidth
+
+total number of int64 elements
+
+layer names
+
+weight shapes
+
+bias shapes
+
+weight offsets
+
+bias offsets
+```
+
+For the current validated configuration the manifest should report:
+
+```json
+{
+  "bitwidth": 64,
+  "scale": 12
+}
+```
+
+The manifest should be retained together with `weights.bin`.
+
+Although the C++ inference binary primarily consumes the raw `weights.bin`,
+the manifest provides an important consistency check when replacing models.
+
+---
+
+#### Selecting a model at runtime
+
+The persistent runner does not require a hard-coded weight directory.
+
+The converted weight file is supplied as the second positional argument:
+
+```bash
+python3 gpu_mpc/run_persistent_local.py \
+  /work/hidden_test/inputs \
+  /work/hidden_model/weights.bin \
+  /work/mpc_keys \
+  --num-samples 1000 \
+  --micro-batch 8 \
+  --bw 64 \
+  --scale 12 \
+  --allow-many-chunks
+```
+
+Therefore compatible model weights can be changed without modifying the runner.
+
+Conceptually:
+
+```text
+Dataset A + Model A
+    |
+    v
+run_persistent_local.py \
+    inputs_A \
+    model_A/weights.bin
+
+
+Dataset B + Model B
+    |
+    v
+run_persistent_local.py \
+    inputs_B \
+    model_B/weights.bin
+```
+
+The runtime model path is data-driven rather than compiled as a fixed repository
+filename.
+
+---
+
+#### Weight and runtime arithmetic must match
+
+The exported fixed-point scale must agree with the inference runtime.
+
+For the current validated configuration:
+
+```text
+weights:
+SCALE=12
+
+input shares:
+SCALE=12
+
+runtime:
+--scale 12
+```
+
+must be consistent.
+
+Similarly:
+
+```text
+runtime BW=64
+```
+
+must use the BW64 input-share format.
+
+A mismatch such as:
+
+```text
+SCALE12 input
++
+SCALE24 model weights
+```
+
+or:
+
+```text
+BW32 shares
++
+BW64 runtime
+```
+
+is not a valid configuration.
+
+The model preparation process should therefore validate these values before
+execution.
+
+---
+
+#### New dataset and new model may be changed independently
+
+The input dataset and model checkpoint are separate runtime assets.
+
+For example:
+
+```text
+new hidden dataset
+        |
+        v
+processed input
+        |
+        +----------------+
+                         |
+new compatible .pth     |
+        |                |
+        v                |
+weights.bin              |
+        |                |
+        +-------+--------+
+                |
+                v
+             inference
+```
+
+A new dataset does not by itself require new model weights.
+
+Likewise, a compatible new checkpoint does not require changes to the raw
+dataset format.
+
+Only the expected DeepDTAGen feature semantics and tensor dimensions must
+remain compatible.
+
+---
+
+#### Planned submission-quality model adapter
+
+The repository currently contains the low-level checkpoint loader and weight
+exporter, but does not yet provide a dedicated submission-oriented command such
+as:
+
+```text
+reference/prepare_model.py
+```
+
+The intended final interface is conceptually:
+
+```bash
+python3 reference/prepare_model.py \
+  --input-pth /input/models/deepdtagen_model_hidden.pth \
+  --output-dir /work/hidden_model \
+  --bw 64 \
+  --scale 12
+```
+
+The wrapper should perform:
+
+```text
+checkpoint existence check
+        |
+        v
+architecture / parameter validation
+        |
+        v
+load checkpoint
+        |
+        v
+export MPC weights
+        |
+        v
+validate weights.bin.json
+        |
+        v
+retain / register public protein model
+```
+
+and produce:
+
+```text
+/work/hidden_model/
+├── model.pth
+├── weights.bin
+└── weights.bin.json
+```
+
+The underlying weight serialization does not need to be redesigned for a
+compatible same-architecture checkpoint.
+
+The final `prepare_model.py` wrapper can therefore be implemented after the
+timed public-protein path is finalized.
+
+---
+
+#### Recommended workflow for a new checkpoint
+
+The intended workflow for an additional same-architecture DeepDTAGen model is:
+
+```text
+1. Receive new checkpoint
+        |
+        v
+/input/models/new_model.pth
+
+
+2. Validate architecture
+        |
+        v
+same affinity topology?
+
+
+3. Export MPC parameters
+        |
+        v
+weights.bin
+weights.bin.json
+
+
+4. Retain public protein parameters
+        |
+        v
+model.pth / cnn.*
+
+
+5. Prepare evaluation dataset using the same model
+        |
+        v
+current:
+protein_emb.dat
+
+future:
+timed public target_sequence -> Gated-CNN
+
+
+6. Run inference
+        |
+        v
+continuous affinity outputs
+```
+
+For a compatible same-architecture model, this workflow should not require
+changes to the persistent MPC execution logic.
 
 ---
 
