@@ -511,9 +511,26 @@ int main(int argc, char *argv[])
                     chunkDir.c_str()
                 );
 
+                auto profDealerInputStart =
+                    std::chrono::high_resolution_clock::now();
+
                 loadShare(chunkDir + "/x_share0.dat", X);
                 loadShare(chunkDir + "/adj_share0.dat", A_hat);
                 loadShare(chunkDir + "/mask_share0.dat", maskTiled);
+
+                auto profDealerInputEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profDealerInputUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profDealerInputEnd -
+                        profDealerInputStart
+                    ).count();
+
+                auto profDealerH2DStart =
+                    std::chrono::high_resolution_clock::now();
 
                 checkCudaErrors(
                     cudaMemcpy(
@@ -547,6 +564,17 @@ int main(int argc, char *argv[])
                     )
                 );
 
+                auto profDealerH2DEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profDealerH2DUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profDealerH2DEnd -
+                        profDealerH2DStart
+                    ).count();
+
                 // Rebind the live input tensors because forward/keygen may
                 // mutate internal device pointers/state.
                 X.d_data = d_X_input;
@@ -554,14 +582,44 @@ int main(int argc, char *argv[])
                 maskTiled.d_data = d_mask_input;
                 proteinEmb.d_data = d_protein_input;
 
+                auto profDealerKeygenStart =
+                    std::chrono::high_resolution_clock::now();
+
                 auto &out = model->forward(X);
                 fss->output(out);
 
+                auto profDealerKeygenEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profDealerKeygenUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profDealerKeygenEnd -
+                        profDealerKeygenStart
+                    ).count();
+
                 size_t chunkKeySize = 0;
+                u64 profDealerSlotWriteUs = 0;
+                u64 profDealerAckWaitUs = 0;
 
                 if (!externalKeyIO) {
+                    auto profSlotWriteStart =
+                        std::chrono::high_resolution_clock::now();
+
                     chunkKeySize =
                         fss->flushChunk(outFd);
+
+                    auto profSlotWriteEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profDealerSlotWriteUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profSlotWriteEnd -
+                            profSlotWriteStart
+                        ).count();
                 }
                 else {
                     std::string slotFile =
@@ -609,20 +667,53 @@ int main(int argc, char *argv[])
                     );
                     ec.clear();
 
-                    int slotFd =
-                        openForWriting(
-                            tmpFile
+                    auto profSlotWriteStart =
+                        std::chrono::high_resolution_clock::now();
+
+                    int slotFd = -1;
+
+                    if (std::getenv("DDG_BUFFERED_SLOT_IO")) {
+                        slotFd = open(
+                            tmpFile.c_str(),
+                            O_WRONLY |
+                            O_LARGEFILE |
+                            O_TRUNC |
+                            O_CREAT,
+                            0644
                         );
+
+                        if (slotFd == -1) {
+                            perror("open buffered dealer key slot");
+                            exit(1);
+                        }
+                    }
+                    else {
+                        slotFd =
+                            openForWriting(
+                                tmpFile
+                            );
+                    }
 
                     chunkKeySize =
                         fss->flushChunk(
                             slotFd
                         );
 
-                    assert(
-                        0 == fsync(slotFd) &&
-                        "slot fsync error!"
-                    );
+                    // The bounded slot is an ephemeral producer-consumer
+                    // object.  fsync() provides crash durability, but forces
+                    // the multi-GB FSS key toward persistent storage before
+                    // the evaluator may consume it.
+                    //
+                    // Preserve the original behavior by default.  For the
+                    // transient-slot optimization experiment, allow the
+                    // evaluator to consume the completed closed/renamed file
+                    // directly from the OS page cache.
+                    if (!std::getenv("DDG_SKIP_SLOT_FSYNC")) {
+                        assert(
+                            0 == fsync(slotFd) &&
+                            "slot fsync error!"
+                        );
+                    }
 
                     closeFile(slotFd);
 
@@ -658,6 +749,17 @@ int main(int argc, char *argv[])
                         readyFile
                     );
 
+                    auto profSlotWriteEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profDealerSlotWriteUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profSlotWriteEnd -
+                            profSlotWriteStart
+                        ).count();
+
                     printf(
                         "[DeepDTAGen] dealer slot ready: "
                         "party=%d chunk=%d bytes=%zu\n",
@@ -669,10 +771,24 @@ int main(int argc, char *argv[])
                     // D2-B correctness mode intentionally waits
                     // until the evaluator finishes the online
                     // computation before reusing this slot.
+                    auto profAckWaitStart =
+                        std::chrono::high_resolution_clock::now();
+
                     ddgWaitForFile(
                         ackFile,
                         "evaluator ack"
                     );
+
+                    auto profAckWaitEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profDealerAckWaitUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profAckWaitEnd -
+                            profAckWaitStart
+                        ).count();
 
                     printf(
                         "[DeepDTAGen] dealer slot acked: "
@@ -700,6 +816,23 @@ int main(int argc, char *argv[])
                         ec
                     );
                 }
+
+                printf(
+                    "[DDG_PROFILE][DEALER] "
+                    "party=%d chunk=%d "
+                    "input_load_us=%lu "
+                    "h2d_us=%lu "
+                    "keygen_us=%lu "
+                    "slot_write_us=%lu "
+                    "ack_wait_us=%lu\n",
+                    party,
+                    chunk,
+                    profDealerInputUs,
+                    profDealerH2DUs,
+                    profDealerKeygenUs,
+                    profDealerSlotWriteUs,
+                    profDealerAckWaitUs
+                );
 
                 printf(
                     "[DeepDTAGen] dealer chunk %d key bytes = %zu\n",
@@ -907,6 +1040,9 @@ int main(int argc, char *argv[])
                 );
 
                 // Refresh this party's input shares.
+                auto profEvalInputStart =
+                    std::chrono::high_resolution_clock::now();
+
                 loadShare(
                     chunkDir + "/x_share" +
                     std::to_string(party) + ".dat",
@@ -934,14 +1070,42 @@ int main(int argc, char *argv[])
                     proteinEmb.zero();
                 }
 
+                auto profEvalInputEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profEvalInputUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profEvalInputEnd -
+                        profEvalInputStart
+                    ).count();
+
+                u64 profEvalKeyWaitUs = 0;
+                u64 profEvalKeyReadUs = 0;
+
                 if (!externalKeyIO) {
                     // Existing sequential-file path.
+                    auto profKeyReadStart =
+                        std::chrono::high_resolution_clock::now();
+
                     readKey(
                         fss->fd,
                         fss->keySize,
                         fss->startPtr,
                         NULL
                     );
+
+                    auto profKeyReadEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profEvalKeyReadUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profKeyReadEnd -
+                            profKeyReadStart
+                        ).count();
                 }
                 else {
                     std::string readyFile =
@@ -958,10 +1122,24 @@ int main(int argc, char *argv[])
                             party
                         );
 
+                    auto profKeyWaitStart =
+                        std::chrono::high_resolution_clock::now();
+
                     ddgWaitForFile(
                         readyFile,
                         "dealer ready"
                     );
+
+                    auto profKeyWaitEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profEvalKeyWaitUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profKeyWaitEnd -
+                            profKeyWaitStart
+                        ).count();
 
                     if (
                         !std::filesystem::exists(
@@ -998,10 +1176,29 @@ int main(int argc, char *argv[])
                         exit(1);
                     }
 
-                    int slotFd =
-                        openForReading(
-                            slotFile
+                    auto profKeyReadStart =
+                        std::chrono::high_resolution_clock::now();
+
+                    int slotFd = -1;
+
+                    if (std::getenv("DDG_BUFFERED_SLOT_IO")) {
+                        slotFd = open(
+                            slotFile.c_str(),
+                            O_RDONLY |
+                            O_LARGEFILE
                         );
+
+                        if (slotFd == -1) {
+                            perror("open buffered evaluator key slot");
+                            exit(1);
+                        }
+                    }
+                    else {
+                        slotFd =
+                            openForReading(
+                                slotFile
+                            );
+                    }
 
                     readKey(
                         slotFd,
@@ -1011,6 +1208,17 @@ int main(int argc, char *argv[])
                     );
 
                     closeFile(slotFd);
+
+                    auto profKeyReadEnd =
+                        std::chrono::high_resolution_clock::now();
+
+                    profEvalKeyReadUs =
+                        std::chrono::duration_cast<
+                            std::chrono::microseconds
+                        >(
+                            profKeyReadEnd -
+                            profKeyReadStart
+                        ).count();
 
                     printf(
                         "[DeepDTAGen] evaluator slot loaded: "
@@ -1022,6 +1230,9 @@ int main(int argc, char *argv[])
                 }
 
                 // Refresh the reusable GPU input buffers with this chunk.
+                auto profEvalH2DStart =
+                    std::chrono::high_resolution_clock::now();
+
                 checkCudaErrors(
                     cudaMemcpy(
                         d_X_work,
@@ -1054,6 +1265,17 @@ int main(int argc, char *argv[])
                         cudaMemcpyHostToDevice
                     )
                 );
+
+                auto profEvalH2DEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profEvalH2DUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profEvalH2DEnd -
+                        profEvalH2DStart
+                    ).count();
 
                 X.d_data = d_X_work;
                 A_hat.d_data = d_A_hat_work;
@@ -1098,7 +1320,21 @@ int main(int argc, char *argv[])
 
                 // Both parties may finish key I/O at different times.
                 // Synchronize immediately before online computation.
+                auto profEvalSyncStart =
+                    std::chrono::high_resolution_clock::now();
+
                 fss->peer->sync();
+
+                auto profEvalSyncEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 profEvalSyncUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        profEvalSyncEnd -
+                        profEvalSyncStart
+                    ).count();
 
                 auto commStart =
                     fss->peer->bytesSent() +
@@ -1128,6 +1364,27 @@ int main(int argc, char *argv[])
                     commEnd - commStart;
 
                 totalCommBytes += chunkComm;
+
+                printf(
+                    "[DDG_PROFILE][EVAL] "
+                    "party=%d chunk=%d "
+                    "input_load_us=%lu "
+                    "key_wait_us=%lu "
+                    "key_read_us=%lu "
+                    "h2d_us=%lu "
+                    "sync_us=%lu "
+                    "compute_us=%lu "
+                    "comm_bytes=%lu\n",
+                    party,
+                    chunk,
+                    profEvalInputUs,
+                    profEvalKeyWaitUs,
+                    profEvalKeyReadUs,
+                    profEvalH2DUs,
+                    profEvalSyncUs,
+                    elapsed,
+                    chunkComm
+                );
 
                 printf(
                     "[DeepDTAGen] evaluator chunk %d "
