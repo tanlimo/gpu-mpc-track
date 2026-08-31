@@ -366,23 +366,60 @@ public:
         startPtr = keyBuf;
     }
 
-    void close()
+    // Write one generated key chunk and reuse the same pinned buffer.
+    // Randomness state deliberately remains alive across chunks.
+    size_t flushChunk(int fd)
     {
         size_t keySize = keyBuf - startPtr;
         size_t padding = 4096 - (keySize % 4096);
+
         char *zeros = new char[padding];
         memset(zeros, 0, padding);
+
         memcpy(keyBuf, zeros, padding);
         keyBuf += padding;
         keySize += padding;
-        assert(keySize < keyBufSize && "Key buffer overflow — raise DDG_KEYBUF_CAP_GB");
-        int fd = openForWriting(keyFile + "_inference_key" + std::to_string(party) + ".dat");
+
+        delete[] zeros;
+
+        assert(keySize < keyBufSize &&
+               "Key buffer overflow — raise DDG_KEYBUF_CAP_GB");
+
         writeKeyBuf(fd, keySize, startPtr);
-        assert(0 == fsync(fd) && "sync error!");
-        closeFile(fd);
-        cpuFree(startPtr, true);
+
+        // Persistent dealer: next chunk starts from the same allocation.
+        keyBuf = startPtr;
+
+        return keySize;
+    }
+
+    // Destroy resources only when the dealer process is really finished.
+    void finalize()
+    {
+        if (startPtr != nullptr) {
+            cpuFree(startPtr, true);
+            startPtr = nullptr;
+            keyBuf = nullptr;
+        }
+
         destroyGPURandomness();
         destroyCPURandomness();
+    }
+
+    // Backward-compatible one-chunk behaviour.
+    void close()
+    {
+        int fd = openForWriting(
+            keyFile + "_inference_key" +
+            std::to_string(party) + ".dat"
+        );
+
+        flushChunk(fd);
+
+        assert(0 == fsync(fd) && "sync error!");
+        closeFile(fd);
+
+        finalize();
     }
 
     void conv2D(u64 fh, u64 fw, u64 padding, u64 stride, u64 ci, u64 co, const Tensor4D<T> &input, const Tensor2D<T> &filter, Tensor4D<T> &output, bool isFirst)
