@@ -100,73 +100,180 @@ public:
                 keyFile + "_inference_key" +
                 std::to_string(party) + ".dat";
 
-            size_t totalKeySize =
-                static_cast<size_t>(
-                    std::filesystem::file_size(filename)
-                );
+            const char *explicitBytesEnv =
+                std::getenv("DDG_EVAL_KEY_CHUNK_BYTES");
 
-            // Default one-shot evaluator: the whole file is one key chunk.
-            keySize = totalKeySize;
+            const bool externalKeyIO =
+                std::getenv("DDG_EVAL_EXTERNAL_KEY_IO") != nullptr;
 
-            // Persistent evaluator prototype: the file contains nChunks
-            // fixed-size key chunks back-to-back, while RAM holds only one.
-            if (const char *chunksEnv =
-                    std::getenv("DDG_EVAL_CHUNKS")) {
+            if (explicitBytesEnv && explicitBytesEnv[0]) {
+                char *endPtr = nullptr;
 
-                long nChunks = std::strtol(
-                    chunksEnv,
-                    nullptr,
-                    10
-                );
+                unsigned long long parsed =
+                    std::strtoull(
+                        explicitBytesEnv,
+                        &endPtr,
+                        10
+                    );
 
-                if (nChunks <= 0) {
+                if (
+                    parsed == 0 ||
+                    endPtr == explicitBytesEnv ||
+                    *endPtr != '\0'
+                ) {
                     fprintf(
                         stderr,
-                        "[DDGOrcaEval] DDG_EVAL_CHUNKS "
-                        "must be >= 1\n"
+                        "[DDGOrcaEval] invalid "
+                        "DDG_EVAL_KEY_CHUNK_BYTES=%s\n",
+                        explicitBytesEnv
                     );
                     exit(1);
                 }
 
-                if (totalKeySize % (size_t)nChunks != 0) {
-                    fprintf(
-                        stderr,
-                        "[DDGOrcaEval] key file size %zu "
-                        "is not divisible by chunks=%ld\n",
-                        totalKeySize,
-                        nChunks
-                    );
-                    exit(1);
-                }
+                keySize = static_cast<size_t>(parsed);
 
-                keySize =
-                    totalKeySize / (size_t)nChunks;
-
-                // readKey/OpenForReading use direct/aligned I/O paths.
                 if (keySize % 4096 != 0) {
                     fprintf(
                         stderr,
-                        "[DDGOrcaEval] chunk key size %zu "
-                        "is not 4096-byte aligned\n",
+                        "[DDGOrcaEval] explicit key chunk "
+                        "size %zu is not 4096-byte aligned\n",
                         keySize
                     );
                     exit(1);
                 }
 
                 printf(
-                    "[DDGOrcaEval] sequential key: "
-                    "total=%zu chunks=%ld chunk=%zu\n",
-                    totalKeySize,
-                    nChunks,
-                    keySize
+                    "[DDGOrcaEval] explicit key chunk "
+                    "bytes=%zu external_io=%d\n",
+                    keySize,
+                    externalKeyIO ? 1 : 0
                 );
+
+                // Compatibility/test mode:
+                // explicit chunk size, but still consume the normal key file.
+                if (!externalKeyIO) {
+                    if (!std::filesystem::exists(filename)) {
+                        fprintf(
+                            stderr,
+                            "[DDGOrcaEval] missing key file: %s\n",
+                            filename.c_str()
+                        );
+                        exit(1);
+                    }
+
+                    size_t totalKeySize =
+                        static_cast<size_t>(
+                            std::filesystem::file_size(filename)
+                        );
+
+                    if (totalKeySize < keySize) {
+                        fprintf(
+                            stderr,
+                            "[DDGOrcaEval] key file too small: "
+                            "total=%zu chunk=%zu\n",
+                            totalKeySize,
+                            keySize
+                        );
+                        exit(1);
+                    }
+
+                    fd = openForReading(filename);
+                }
+                else {
+                    // D2 pipeline mode:
+                    // no key file is required at constructor time.
+                    // Persistent evaluator code will fill startPtr
+                    // from a bounded key slot for each chunk.
+                    fd = -1;
+                }
+            }
+            else {
+                if (externalKeyIO) {
+                    fprintf(
+                        stderr,
+                        "[DDGOrcaEval] "
+                        "DDG_EVAL_EXTERNAL_KEY_IO requires "
+                        "DDG_EVAL_KEY_CHUNK_BYTES\n"
+                    );
+                    exit(1);
+                }
+
+                size_t totalKeySize =
+                    static_cast<size_t>(
+                        std::filesystem::file_size(filename)
+                    );
+
+                // Default one-shot evaluator:
+                // the whole file is one key chunk.
+                keySize = totalKeySize;
+
+                // Existing persistent sequential-file mode.
+                if (const char *chunksEnv =
+                        std::getenv("DDG_EVAL_CHUNKS")) {
+
+                    long nChunks =
+                        std::strtol(
+                            chunksEnv,
+                            nullptr,
+                            10
+                        );
+
+                    if (nChunks <= 0) {
+                        fprintf(
+                            stderr,
+                            "[DDGOrcaEval] DDG_EVAL_CHUNKS "
+                            "must be >= 1\n"
+                        );
+                        exit(1);
+                    }
+
+                    if (
+                        totalKeySize %
+                        static_cast<size_t>(nChunks) != 0
+                    ) {
+                        fprintf(
+                            stderr,
+                            "[DDGOrcaEval] key file size %zu "
+                            "is not divisible by chunks=%ld\n",
+                            totalKeySize,
+                            nChunks
+                        );
+                        exit(1);
+                    }
+
+                    keySize =
+                        totalKeySize /
+                        static_cast<size_t>(nChunks);
+
+                    if (keySize % 4096 != 0) {
+                        fprintf(
+                            stderr,
+                            "[DDGOrcaEval] chunk key size %zu "
+                            "is not 4096-byte aligned\n",
+                            keySize
+                        );
+                        exit(1);
+                    }
+
+                    printf(
+                        "[DDGOrcaEval] sequential key: "
+                        "total=%zu chunks=%ld chunk=%zu\n",
+                        totalKeySize,
+                        nChunks,
+                        keySize
+                    );
+                }
+
+                fd = openForReading(filename);
             }
 
-            fd = openForReading(filename);
+            // Always allocate exactly one key chunk.
+            getAlignedBuf(
+                &keyBuf,
+                keySize,
+                false
+            );
 
-            // Evaluator working set is one key chunk, not the
-            // entire sequential key file.
-            getAlignedBuf(&keyBuf, keySize, false);
             startPtr = keyBuf;
         }
         peer = new GpuPeer(compress);
