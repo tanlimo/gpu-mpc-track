@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <numeric>
+#include <thread>
 #include <omp.h>
 
 #include "ddg_orca.h"  // Forked Orca backend with mul/scalarmul for graph models
@@ -48,6 +49,106 @@
 #ifndef InfType
 #define InfType u64
 #endif
+
+
+// ── bounded-key single-slot handshake helpers ──────────────────────────────
+//
+// D2 pipeline uses one reusable key file per party:
+//
+//   Dealer:    write slot -> publish ready -> wait ack
+//   Evaluator: wait ready -> read slot -> compute -> publish ack
+//
+// Ready/ack markers are per chunk, while the large key slot itself is reused.
+//
+static std::string ddgKeySlotPath(
+    const std::string &root,
+    int party
+)
+{
+    return root + "/party" +
+           std::to_string(party) +
+           ".key";
+}
+
+static std::string ddgKeyMarkerPath(
+    const std::string &root,
+    int party,
+    const char *kind,
+    int chunk
+)
+{
+    char name[128];
+
+    snprintf(
+        name,
+        sizeof(name),
+        "party%d.%s.%05d",
+        party,
+        kind,
+        chunk
+    );
+
+    return root + "/" + std::string(name);
+}
+
+static void ddgWaitForFile(
+    const std::string &path,
+    const char *what
+)
+{
+    using namespace std::chrono;
+
+    auto deadline =
+        steady_clock::now() + minutes(30);
+
+    while (!std::filesystem::exists(path)) {
+        if (steady_clock::now() >= deadline) {
+            fprintf(
+                stderr,
+                "[DeepDTAGen] timeout waiting for %s: %s\n",
+                what,
+                path.c_str()
+            );
+            exit(1);
+        }
+
+        std::this_thread::sleep_for(
+            milliseconds(10)
+        );
+    }
+}
+
+static void ddgCreateMarker(
+    const std::string &path
+)
+{
+    std::ofstream f(
+        path,
+        std::ios::out |
+        std::ios::trunc
+    );
+
+    if (!f.good()) {
+        fprintf(
+            stderr,
+            "[DeepDTAGen] cannot create marker: %s\n",
+            path.c_str()
+        );
+        exit(1);
+    }
+
+    f << "1\n";
+    f.flush();
+
+    if (!f.good()) {
+        fprintf(
+            stderr,
+            "[DeepDTAGen] failed writing marker: %s\n",
+            path.c_str()
+        );
+        exit(1);
+    }
+}
 
 // Load a length-n fixed-point share file (headerless little-endian InfType —
 // u32 for BW=32, u64 for BW=64 — matching reference/share_data.py's bw mode)
@@ -342,13 +443,52 @@ int main(int argc, char *argv[])
             // Dealer protein mask remains zero for every chunk.
             proteinEmb.zero();
 
-            std::string outFile =
-                keyFileName +
-                "_inference_key" +
-                std::to_string(party) +
-                ".dat";
+            const bool externalKeyIO =
+                std::getenv(
+                    "DDG_DEALER_EXTERNAL_KEY_IO"
+                ) != nullptr;
 
-            int outFd = openForWriting(outFile);
+            const char *slotRootEnv =
+                std::getenv("DDG_KEY_SLOT_ROOT");
+
+            std::string slotRoot;
+            int outFd = -1;
+
+            if (externalKeyIO) {
+                if (!(slotRootEnv && slotRootEnv[0])) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] "
+                        "DDG_DEALER_EXTERNAL_KEY_IO requires "
+                        "DDG_KEY_SLOT_ROOT\n"
+                    );
+                    exit(1);
+                }
+
+                slotRoot =
+                    std::string(slotRootEnv);
+
+                std::filesystem::create_directories(
+                    slotRoot
+                );
+
+                printf(
+                    "[DeepDTAGen] dealer bounded-key mode: "
+                    "party=%d slot_root=%s\n",
+                    party,
+                    slotRoot.c_str()
+                );
+            }
+            else {
+                std::string outFile =
+                    keyFileName +
+                    "_inference_key" +
+                    std::to_string(party) +
+                    ".dat";
+
+                outFd =
+                    openForWriting(outFile);
+            }
 
             size_t expectedChunkKeySize = 0;
 
@@ -417,7 +557,149 @@ int main(int argc, char *argv[])
                 auto &out = model->forward(X);
                 fss->output(out);
 
-                size_t chunkKeySize = fss->flushChunk(outFd);
+                size_t chunkKeySize = 0;
+
+                if (!externalKeyIO) {
+                    chunkKeySize =
+                        fss->flushChunk(outFd);
+                }
+                else {
+                    std::string slotFile =
+                        ddgKeySlotPath(
+                            slotRoot,
+                            party
+                        );
+
+                    std::string tmpFile =
+                        slotFile + ".tmp";
+
+                    std::string readyFile =
+                        ddgKeyMarkerPath(
+                            slotRoot,
+                            party,
+                            "ready",
+                            chunk
+                        );
+
+                    std::string ackFile =
+                        ddgKeyMarkerPath(
+                            slotRoot,
+                            party,
+                            "ack",
+                            chunk
+                        );
+
+                    std::error_code ec;
+
+                    std::filesystem::remove(
+                        tmpFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    std::filesystem::remove(
+                        readyFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    std::filesystem::remove(
+                        ackFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    int slotFd =
+                        openForWriting(
+                            tmpFile
+                        );
+
+                    chunkKeySize =
+                        fss->flushChunk(
+                            slotFd
+                        );
+
+                    assert(
+                        0 == fsync(slotFd) &&
+                        "slot fsync error!"
+                    );
+
+                    closeFile(slotFd);
+
+                    // Publish the completed slot atomically:
+                    // evaluator never observes the temporary file.
+                    std::filesystem::remove(
+                        slotFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    std::filesystem::rename(
+                        tmpFile,
+                        slotFile,
+                        ec
+                    );
+
+                    if (ec) {
+                        fprintf(
+                            stderr,
+                            "[DeepDTAGen] slot rename failed: "
+                            "%s -> %s: %s\n",
+                            tmpFile.c_str(),
+                            slotFile.c_str(),
+                            ec.message().c_str()
+                        );
+                        exit(1);
+                    }
+
+                    // Only publish ready after the full key has
+                    // been written, fsynced and renamed.
+                    ddgCreateMarker(
+                        readyFile
+                    );
+
+                    printf(
+                        "[DeepDTAGen] dealer slot ready: "
+                        "party=%d chunk=%d bytes=%zu\n",
+                        party,
+                        chunk,
+                        chunkKeySize
+                    );
+
+                    // D2-B correctness mode intentionally waits
+                    // until the evaluator finishes the online
+                    // computation before reusing this slot.
+                    ddgWaitForFile(
+                        ackFile,
+                        "evaluator ack"
+                    );
+
+                    printf(
+                        "[DeepDTAGen] dealer slot acked: "
+                        "party=%d chunk=%d\n",
+                        party,
+                        chunk
+                    );
+
+                    std::filesystem::remove(
+                        readyFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    std::filesystem::remove(
+                        ackFile,
+                        ec
+                    );
+                    ec.clear();
+
+                    // The evaluator has already copied the key
+                    // into its fixed RAM buffer.
+                    std::filesystem::remove(
+                        slotFile,
+                        ec
+                    );
+                }
 
                 printf(
                     "[DeepDTAGen] dealer chunk %d key bytes = %zu\n",
@@ -441,8 +723,14 @@ int main(int argc, char *argv[])
                 }
             }
 
-            assert(0 == fsync(outFd) && "sync error!");
-            closeFile(outFd);
+            if (!externalKeyIO) {
+                assert(
+                    0 == fsync(outFd) &&
+                    "sync error!"
+                );
+
+                closeFile(outFd);
+            }
 
             gpuFree(d_X_input);
             gpuFree(d_A_hat_input);
@@ -518,6 +806,48 @@ int main(int argc, char *argv[])
 
             std::string evalChunkRoot(evalChunkRootEnv);
 
+            const bool externalKeyIO =
+                std::getenv(
+                    "DDG_EVAL_EXTERNAL_KEY_IO"
+                ) != nullptr;
+
+            const char *slotRootEnv =
+                std::getenv("DDG_KEY_SLOT_ROOT");
+
+            std::string slotRoot;
+
+            if (externalKeyIO) {
+                if (!(slotRootEnv && slotRootEnv[0])) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] "
+                        "DDG_EVAL_EXTERNAL_KEY_IO requires "
+                        "DDG_KEY_SLOT_ROOT\n"
+                    );
+                    exit(1);
+                }
+
+                slotRoot =
+                    std::string(slotRootEnv);
+
+                if (fss->fd != -1) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] external evaluator "
+                        "expected fd=-1, got %d\n",
+                        fss->fd
+                    );
+                    exit(1);
+                }
+
+                printf(
+                    "[DeepDTAGen] evaluator bounded-key mode: "
+                    "party=%d slot_root=%s\n",
+                    party,
+                    slotRoot.c_str()
+                );
+            }
+
             printf(
                 "[DeepDTAGen] persistent evaluator: "
                 "chunks=%d BATCH=%d key_chunk=%zu\n",
@@ -547,10 +877,13 @@ int main(int argc, char *argv[])
             std::vector<u64> chunkTimes;
             u64 totalCommBytes = 0;
 
-            // Sequential reads start at key chunk 0.
-            if (lseek(fss->fd, 0, SEEK_SET) < 0) {
-                perror("lseek");
-                exit(1);
+            // Sequential-file mode starts at chunk 0.
+            // External-slot mode has no persistent key fd.
+            if (!externalKeyIO) {
+                if (lseek(fss->fd, 0, SEEK_SET) < 0) {
+                    perror("lseek");
+                    exit(1);
+                }
             }
 
             for (int chunk = 0; chunk < nChunks; ++chunk) {
@@ -601,14 +934,92 @@ int main(int argc, char *argv[])
                     proteinEmb.zero();
                 }
 
-                // Read exactly the next key chunk from the already-open
-                // sequential key file.  readKey advances the fd offset.
-                readKey(
-                    fss->fd,
-                    fss->keySize,
-                    fss->startPtr,
-                    NULL
-                );
+                if (!externalKeyIO) {
+                    // Existing sequential-file path.
+                    readKey(
+                        fss->fd,
+                        fss->keySize,
+                        fss->startPtr,
+                        NULL
+                    );
+                }
+                else {
+                    std::string readyFile =
+                        ddgKeyMarkerPath(
+                            slotRoot,
+                            party,
+                            "ready",
+                            chunk
+                        );
+
+                    std::string slotFile =
+                        ddgKeySlotPath(
+                            slotRoot,
+                            party
+                        );
+
+                    ddgWaitForFile(
+                        readyFile,
+                        "dealer ready"
+                    );
+
+                    if (
+                        !std::filesystem::exists(
+                            slotFile
+                        )
+                    ) {
+                        fprintf(
+                            stderr,
+                            "[DeepDTAGen] ready marker exists "
+                            "but key slot is missing: %s\n",
+                            slotFile.c_str()
+                        );
+                        exit(1);
+                    }
+
+                    size_t slotBytes =
+                        static_cast<size_t>(
+                            std::filesystem::file_size(
+                                slotFile
+                            )
+                        );
+
+                    if (slotBytes != fss->keySize) {
+                        fprintf(
+                            stderr,
+                            "[DeepDTAGen] slot size mismatch: "
+                            "expected=%zu actual=%zu "
+                            "party=%d chunk=%d\n",
+                            fss->keySize,
+                            slotBytes,
+                            party,
+                            chunk
+                        );
+                        exit(1);
+                    }
+
+                    int slotFd =
+                        openForReading(
+                            slotFile
+                        );
+
+                    readKey(
+                        slotFd,
+                        fss->keySize,
+                        fss->startPtr,
+                        NULL
+                    );
+
+                    closeFile(slotFd);
+
+                    printf(
+                        "[DeepDTAGen] evaluator slot loaded: "
+                        "party=%d chunk=%d bytes=%zu\n",
+                        party,
+                        chunk,
+                        fss->keySize
+                    );
+                }
 
                 // Refresh the reusable GPU input buffers with this chunk.
                 checkCudaErrors(
@@ -749,6 +1160,27 @@ int main(int argc, char *argv[])
                             aff
                         );
                     }
+                }
+
+                if (externalKeyIO) {
+                    std::string ackFile =
+                        ddgKeyMarkerPath(
+                            slotRoot,
+                            party,
+                            "ack",
+                            chunk
+                        );
+
+                    ddgCreateMarker(
+                        ackFile
+                    );
+
+                    printf(
+                        "[DeepDTAGen] evaluator slot ack: "
+                        "party=%d chunk=%d\n",
+                        party,
+                        chunk
+                    );
                 }
             }
 
