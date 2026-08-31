@@ -24,7 +24,7 @@ import os
 import numpy as np
 
 BITWIDTH = 64
-DEFAULT_SCALE = 24
+DEFAULT_SCALE = 12
 
 # forward-order (attribute, count) of the MPC-secured layer groups
 _MPC_GROUPS = ("gcn", "drug_fc", "fusion")

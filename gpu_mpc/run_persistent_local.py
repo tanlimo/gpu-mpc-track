@@ -2,7 +2,7 @@
 """
 Persistent arbitrary-N local DeepDTAGen MPC runner.
 
-D1 correctness prototype:
+Fixed-shape persistent execution:
     logical N
       -> fixed internal micro-batch B
       -> ceil(N / B) fixed-shape chunks
@@ -247,8 +247,8 @@ def main() -> int:
         "--allow-many-chunks",
         action="store_true",
         help=(
-            "allow >4 chunks even though D1 still accumulates "
-            "all sequential keys on disk"
+            "allow >4 chunks; the current validation runner "
+            "pre-materializes fixed-B input chunk directories"
         ),
     )
     ap.add_argument("--keep-keys", action="store_true")
