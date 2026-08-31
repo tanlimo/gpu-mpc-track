@@ -41,6 +41,324 @@ AFF_GLOBAL_RE = re.compile(
 )
 
 
+DEALER_PROFILE_RE = re.compile(
+    r"^\[DDG_PROFILE\]\[DEALER\] "
+    r"party=(\d+) chunk=(\d+) "
+    r"input_load_us=(\d+) "
+    r"h2d_us=(\d+) "
+    r"keygen_us=(\d+) "
+    r"slot_write_us=(\d+) "
+    r"ack_wait_us=(\d+)$",
+    re.MULTILINE,
+)
+
+
+EVAL_PROFILE_RE = re.compile(
+    r"^\[DDG_PROFILE\]\[EVAL\] "
+    r"party=(\d+) chunk=(\d+) "
+    r"input_load_us=(\d+) "
+    r"key_wait_us=(\d+) "
+    r"key_read_us=(\d+) "
+    r"h2d_us=(\d+) "
+    r"sync_us=(\d+) "
+    r"compute_us=(\d+) "
+    r"comm_bytes=(\d+)$",
+    re.MULTILINE,
+)
+
+
+def parse_profile_totals(
+    log: Path,
+    pattern: re.Pattern,
+    expected_party: int,
+    expected_chunks: int,
+    fields: tuple[str, ...],
+    label: str,
+) -> dict[str, int]:
+    """
+    Parse one party's per-chunk DDG_PROFILE records.
+
+    Returned values are diagnostic sums only.
+
+    They must NOT be used to reconstruct total wall time because
+    Dealer/Evaluator activity and wait intervals can overlap.
+    """
+    text = log.read_text(errors="ignore")
+
+    rows = [
+        tuple(int(v) for v in match)
+        for match in pattern.findall(text)
+    ]
+
+    if len(rows) != expected_chunks:
+        raise RuntimeError(
+            f"{label}: expected {expected_chunks} profile rows, "
+            f"got {len(rows)}"
+        )
+
+    parties = {
+        row[0]
+        for row in rows
+    }
+
+    if parties != {expected_party}:
+        raise RuntimeError(
+            f"{label}: unexpected party ids "
+            f"{sorted(parties)}"
+        )
+
+    observed_chunks = sorted(
+        row[1]
+        for row in rows
+    )
+
+    expected = list(range(expected_chunks))
+
+    if observed_chunks != expected:
+        raise RuntimeError(
+            f"{label}: expected chunks {expected}, "
+            f"got {observed_chunks}"
+        )
+
+    totals: dict[str, int] = {}
+
+    for field_idx, name in enumerate(
+        fields,
+        start=2,
+    ):
+        totals[name] = sum(
+            row[field_idx]
+            for row in rows
+        )
+
+    return totals
+
+
+def emit_timing_report(
+    *,
+    samples: int,
+    micro_batch: int,
+    chunks: int,
+    padded_samples: int,
+    bw: int,
+    scale: int,
+    key_chunk_bytes: int,
+    chunk_materialize_us: int,
+    timed_wall_us: int,
+    dealer_totals: dict[int, dict[str, int]],
+    eval_totals: dict[int, dict[str, int]],
+) -> None:
+    """
+    Emit machine-readable and human-readable timing reports.
+
+    timed_wall_us is measured independently with a real wall-clock
+    interval. It is intentionally NOT reconstructed by adding the
+    diagnostic phase sums.
+    """
+    if timed_wall_us <= 0:
+        raise RuntimeError(
+            f"invalid timed wall: {timed_wall_us} us"
+        )
+
+    throughput = (
+        samples * 1_000_000.0 /
+        timed_wall_us
+    )
+
+    print()
+    print("========================================")
+    print("MACHINE-READABLE TIMING")
+    print("========================================")
+
+    print(
+        "[DDG_TIME][SCHEMA] "
+        "version=1 "
+        "status=PRE_COMPLIANCE"
+    )
+
+    print(
+        "[DDG_TIME][PREPROCESS_UNTIMED] "
+        f"samples={samples} "
+        f"micro_batch={micro_batch} "
+        f"chunks={chunks} "
+        f"chunk_materialize_us={chunk_materialize_us}"
+    )
+
+    for party in (0, 1):
+        d = dealer_totals[party]
+
+        print(
+            "[DDG_TIME][DEALER] "
+            f"party={party} "
+            f"chunks={chunks} "
+            f"input_load_us={d['input_load_us']} "
+            f"h2d_us={d['h2d_us']} "
+            f"keygen_us={d['keygen_us']} "
+            f"key_slot_write_us={d['slot_write_us']} "
+            f"ack_wait_us={d['ack_wait_us']}"
+        )
+
+    for party in (0, 1):
+        e = eval_totals[party]
+
+        print(
+            "[DDG_TIME][EVALUATOR] "
+            f"party={party} "
+            f"chunks={chunks} "
+            f"input_load_us={e['input_load_us']} "
+            f"key_wait_us={e['key_wait_us']} "
+            f"key_read_us={e['key_read_us']} "
+            f"h2d_us={e['h2d_us']} "
+            f"sync_us={e['sync_us']} "
+            f"compute_us={e['compute_us']} "
+            f"comm_bytes={e['comm_bytes']}"
+        )
+
+    print(
+        "[DDG_TIME][COMPLIANCE] "
+        "status=PRE_COMPLIANCE "
+        "public_protein_model="
+        "precomputed_outside_timed_path "
+        "secret_adj_norm="
+        "precomputed_outside_timed_path"
+    )
+
+    print(
+        "[DDG_TIME][TOTAL] "
+        "status=PRE_COMPLIANCE "
+        f"samples={samples} "
+        f"micro_batch={micro_batch} "
+        f"chunks={chunks} "
+        f"padded_samples={padded_samples} "
+        f"bw={bw} "
+        f"scale={scale} "
+        f"key_chunk_bytes={key_chunk_bytes} "
+        f"timed_wall_us={timed_wall_us} "
+        f"throughput_samples_s={throughput:.6f} "
+        f"mpc_comm_bytes_party0="
+        f"{eval_totals[0]['comm_bytes']} "
+        f"mpc_comm_bytes_party1="
+        f"{eval_totals[1]['comm_bytes']}"
+    )
+
+    print()
+    print("========================================")
+    print("DeepDTAGen Timing Summary")
+    print("========================================")
+
+    print("Status")
+    print("  PRE-COMPLIANCE")
+    print()
+
+    print("Run configuration")
+    print(f"  logical samples       : {samples}")
+    print(f"  micro-batch           : {micro_batch}")
+    print(f"  chunks                : {chunks}")
+    print(f"  padded samples        : {padded_samples}")
+    print(f"  BW / SCALE            : {bw} / {scale}")
+    print(
+        "  key bytes/chunk/party : "
+        f"{key_chunk_bytes:,}"
+    )
+    print()
+
+    print("Competition-untimed preparation")
+    print(
+        "  fixed-B chunk materialization : "
+        f"{chunk_materialize_us / 1e6:.6f} s"
+    )
+    print()
+
+    print("Competition-timed CURRENT local pipeline")
+    print(
+        "  wall time             : "
+        f"{timed_wall_us / 1e6:.6f} s"
+    )
+    print(
+        "  throughput            : "
+        f"{throughput:.6f} samples/s"
+    )
+    print()
+
+    print("Dealer diagnostic phase sums")
+
+    for party in (0, 1):
+        d = dealer_totals[party]
+
+        print(
+            f"  P{party} input load         : "
+            f"{d['input_load_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} H2D                : "
+            f"{d['h2d_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} key generation     : "
+            f"{d['keygen_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} key-slot write     : "
+            f"{d['slot_write_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} ACK wait           : "
+            f"{d['ack_wait_us'] / 1e6:.6f} s"
+        )
+
+    print()
+    print("Evaluator diagnostic phase sums")
+
+    for party in (0, 1):
+        e = eval_totals[party]
+
+        print(
+            f"  P{party} input load         : "
+            f"{e['input_load_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} key wait           : "
+            f"{e['key_wait_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} key read           : "
+            f"{e['key_read_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} H2D                : "
+            f"{e['h2d_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} peer sync          : "
+            f"{e['sync_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} MPC compute        : "
+            f"{e['compute_us'] / 1e6:.6f} s"
+        )
+        print(
+            f"  P{party} comm sent+received : "
+            f"{e['comm_bytes']:,} bytes"
+        )
+
+    print()
+    print("NOT YET INCLUDED in competition-timed wall")
+    print(
+        "  public protein Gated-CNN : "
+        "PRECOMPUTED OUTSIDE TIMED PATH"
+    )
+    print(
+        "  secure A -> A_norm       : "
+        "PRECOMPUTED OUTSIDE TIMED PATH"
+    )
+    print()
+
+    print(
+        "NOTE: diagnostic phase sums can overlap and "
+        "must not be added to reconstruct wall time."
+    )
+
+
 def make_fixed_chunk(
     src: Path,
     dst: Path,
@@ -341,6 +659,10 @@ def main() -> int:
         # ------------------------------------------------------------
         # Prepare fixed-B chunk directories.
         # ------------------------------------------------------------
+        chunk_materialize_start_ns = (
+            time.perf_counter_ns()
+        )
+
         offset = 0
 
         for chunk in range(n_chunks):
@@ -364,6 +686,15 @@ def main() -> int:
             )
 
             offset += real_batch
+
+        chunk_materialize_end_ns = (
+            time.perf_counter_ns()
+        )
+
+        chunk_materialize_us = (
+            chunk_materialize_end_ns -
+            chunk_materialize_start_ns
+        ) // 1000
 
         chunk0 = work_root / "chunk_00000"
 
@@ -395,6 +726,17 @@ def main() -> int:
         eval_files = {}
 
         try:
+            # --------------------------------------------------------
+            # Current PRE-COMPLIANCE timed boundary.
+            #
+            # Start immediately before persistent Dealer launch.
+            # End only after both Dealers and both Evaluators exit.
+            #
+            # Public protein Gated-CNN and secure A -> A_norm are
+            # not yet inside this boundary and are reported as such.
+            # --------------------------------------------------------
+            timed_start_ns = time.perf_counter_ns()
+
             # --------------------------------------------------------
             # Start BOTH persistent Dealers.
             #
@@ -596,6 +938,13 @@ def main() -> int:
             dealer_files[0].close()
             dealer_files[1].close()
 
+            timed_end_ns = time.perf_counter_ns()
+
+            timed_wall_us = (
+                timed_end_ns -
+                timed_start_ns
+            ) // 1000
+
             print(
                 "[driver] return codes: "
                 f"D0={d0_rc} D1={d1_rc} "
@@ -704,6 +1053,62 @@ def main() -> int:
 
         print(
             "[driver] bounded key slot cleanup: PASS"
+        )
+
+        dealer_fields = (
+            "input_load_us",
+            "h2d_us",
+            "keygen_us",
+            "slot_write_us",
+            "ack_wait_us",
+        )
+
+        eval_fields = (
+            "input_load_us",
+            "key_wait_us",
+            "key_read_us",
+            "h2d_us",
+            "sync_us",
+            "compute_us",
+            "comm_bytes",
+        )
+
+        dealer_totals = {
+            party: parse_profile_totals(
+                log=logs / f"dealer_p{party}.log",
+                pattern=DEALER_PROFILE_RE,
+                expected_party=party,
+                expected_chunks=n_chunks,
+                fields=dealer_fields,
+                label=f"dealer P{party}",
+            )
+            for party in (0, 1)
+        }
+
+        eval_totals = {
+            party: parse_profile_totals(
+                log=logs / f"eval_p{party}.log",
+                pattern=EVAL_PROFILE_RE,
+                expected_party=party,
+                expected_chunks=n_chunks,
+                fields=eval_fields,
+                label=f"evaluator P{party}",
+            )
+            for party in (0, 1)
+        }
+
+        emit_timing_report(
+            samples=N,
+            micro_batch=B,
+            chunks=n_chunks,
+            padded_samples=padded_n - N,
+            bw=args.bw,
+            scale=args.scale,
+            key_chunk_bytes=key_chunk_bytes,
+            chunk_materialize_us=chunk_materialize_us,
+            timed_wall_us=timed_wall_us,
+            dealer_totals=dealer_totals,
+            eval_totals=eval_totals,
         )
 
         # ------------------------------------------------------------
