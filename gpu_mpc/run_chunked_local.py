@@ -66,8 +66,26 @@ def bytes_per_sample(bw: int) -> dict[str, int]:
     }
 
 
-def inspect_source(src: Path, bw: int) -> tuple[int, dict[str, int]]:
+def inspect_source(
+    src: Path,
+    bw: int,
+    require_protein_emb: bool = True,
+) -> tuple[int, dict[str, int]]:
+    """Inspect one sample-major input directory.
+
+    Legacy callers require precomputed protein_emb.dat.
+
+    The production timed-Protein path does not: protein_emb.dat is model
+    output generated from public target_ids.dat inside the measured runtime.
+    """
     layout = bytes_per_sample(bw)
+
+    if not require_protein_emb:
+        layout.pop(
+            "protein_emb.dat",
+            None,
+        )
+
     counts = []
 
     for name, stride in layout.items():

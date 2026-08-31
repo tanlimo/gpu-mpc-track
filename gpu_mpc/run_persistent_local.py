@@ -29,6 +29,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -147,6 +148,9 @@ def emit_timing_report(
     timed_wall_us: int,
     dealer_totals: dict[int, dict[str, int]],
     eval_totals: dict[int, dict[str, int]],
+    secure_adj_norm: bool,
+    timed_protein: bool,
+    protein_runtime_us: int,
 ) -> None:
     """
     Emit machine-readable and human-readable timing reports.
@@ -163,6 +167,18 @@ def emit_timing_report(
     throughput = (
         samples * 1_000_000.0 /
         timed_wall_us
+    )
+
+    adj_norm_status = (
+        "secure_online"
+        if secure_adj_norm
+        else "precomputed_outside_timed_path"
+    )
+
+    protein_status = (
+        "timed_fp32_gpu"
+        if timed_protein
+        else "precomputed_outside_timed_path"
     )
 
     print()
@@ -182,6 +198,12 @@ def emit_timing_report(
         f"micro_batch={micro_batch} "
         f"chunks={chunks} "
         f"chunk_materialize_us={chunk_materialize_us}"
+    )
+
+    print(
+        "[DDG_TIME][PROTEIN] "
+        f"mode={protein_status} "
+        f"runtime_us={protein_runtime_us}"
     )
 
     for party in (0, 1):
@@ -214,21 +236,10 @@ def emit_timing_report(
             f"comm_bytes={e['comm_bytes']}"
         )
 
-    secure_adj_norm = (
-        not args.legacy_precomputed_adj
-    )
-
-    adj_norm_status = (
-        "secure_online"
-        if secure_adj_norm
-        else "precomputed_outside_timed_path"
-    )
-
     print(
         "[DDG_TIME][COMPLIANCE] "
         "status=PRE_COMPLIANCE "
-        "public_protein_model="
-        "precomputed_outside_timed_path "
+        f"public_protein_model={protein_status} "
         f"secret_adj_norm={adj_norm_status}"
     )
 
@@ -351,10 +362,14 @@ def emit_timing_report(
         )
 
     print()
-    print("NOT YET INCLUDED in competition-timed wall")
+    print("Model-computation coverage")
     print(
-        "  public protein Gated-CNN : "
-        "PRECOMPUTED OUTSIDE TIMED PATH"
+        "  public protein Gated-CNN : " +
+        (
+            "TIMED FP32 GPU / INCLUDED"
+            if timed_protein
+            else "PRECOMPUTED OUTSIDE TIMED PATH"
+        )
     )
     print(
         "  secure A -> A_norm       : " +
@@ -583,6 +598,25 @@ def main() -> int:
     )
 
     ap.add_argument(
+        "--protein-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "released DeepDTAGen .pth containing cnn.*; "
+            "required for the default timed public Protein GatedCNN"
+        ),
+    )
+
+    ap.add_argument(
+        "--legacy-precomputed-protein",
+        action="store_true",
+        help=(
+            "debug/regression only: use source protein_emb.dat "
+            "instead of running public GatedCNN inside timed path"
+        ),
+    )
+
+    ap.add_argument(
         "--legacy-precomputed-adj",
         action="store_true",
         help=(
@@ -608,6 +642,16 @@ def main() -> int:
     weights = args.weights_bin.resolve()
     key_parent = args.key_parent.resolve()
 
+    timed_protein = (
+        not args.legacy_precomputed_protein
+    )
+
+    protein_checkpoint = (
+        args.protein_checkpoint.resolve()
+        if args.protein_checkpoint is not None
+        else None
+    )
+
     if args.num_samples <= 0:
         ap.error("--num-samples must be > 0")
 
@@ -620,7 +664,56 @@ def main() -> int:
     if not weights.is_file():
         raise FileNotFoundError(weights)
 
-    available, layout = inspect_source(src, args.bw)
+    available, layout = inspect_source(
+        src,
+        args.bw,
+        require_protein_emb=not timed_protein,
+    )
+
+    if timed_protein:
+        if protein_checkpoint is None:
+            ap.error(
+                "--protein-checkpoint is required unless "
+                "--legacy-precomputed-protein is used"
+            )
+
+        if not protein_checkpoint.is_file():
+            raise FileNotFoundError(
+                protein_checkpoint
+            )
+
+        target_ids_src = (
+            src / "target_ids.dat"
+        )
+
+        if not target_ids_src.is_file():
+            raise FileNotFoundError(
+                "timed Protein GatedCNN requires public "
+                f"target ids: {target_ids_src}"
+            )
+
+        target_stride = 1000 * 8
+
+        target_bytes = (
+            target_ids_src.stat().st_size
+        )
+
+        if target_bytes % target_stride != 0:
+            raise RuntimeError(
+                f"{target_ids_src}: size={target_bytes} "
+                f"is not divisible by {target_stride}"
+            )
+
+        target_samples = (
+            target_bytes // target_stride
+        )
+
+        if target_samples != available:
+            raise RuntimeError(
+                "target_ids.dat sample count mismatch: "
+                f"target={target_samples}, "
+                f"MPC source={available}"
+            )
 
     if args.num_samples > available:
         raise RuntimeError(
@@ -691,6 +784,18 @@ def main() -> int:
                 else "raw 0/1 adjacency scale=0; secure A_norm online"
             )
         )
+        print(
+            "protein path      = " +
+            (
+                "legacy precomputed protein_emb.dat"
+                if args.legacy_precomputed_protein
+                else "timed FP32 GPU GatedCNN"
+            )
+        )
+        if timed_protein:
+            print(
+                f"protein checkpoint= {protein_checkpoint}"
+            )
         print(f"work root        = {work_root}")
         print(f"key run          = {key_run}")
 
@@ -716,6 +821,35 @@ def main() -> int:
                 fixed_batch=B,
                 layout=layout,
             )
+
+            if timed_protein:
+                target_stride = 1000 * 8
+
+                target_out = (
+                    chunk_dir /
+                    "target_ids.dat"
+                )
+
+                copy_range(
+                    src / "target_ids.dat",
+                    target_out,
+                    offset * target_stride,
+                    real_batch * target_stride,
+                )
+
+                # Public zero-padding corresponds to padding index 0.
+                with target_out.open("r+b") as f:
+                    f.truncate(
+                        B * target_stride
+                    )
+
+                if (
+                    target_out.stat().st_size
+                    != B * target_stride
+                ):
+                    raise RuntimeError(
+                        f"{target_out}: invalid padded size"
+                    )
 
             print(
                 f"[driver] chunk={chunk} "
@@ -770,10 +904,99 @@ def main() -> int:
             # Start immediately before persistent Dealer launch.
             # End only after both Dealers and both Evaluators exit.
             #
-            # Public protein Gated-CNN and secure A -> A_norm are
-            # not yet inside this boundary and are reported as such.
+            # In the default production path:
+            #   * public Protein GatedCNN runs immediately after
+            #     timed_start_ns;
+            #   * secure A -> A_norm runs inside evaluator compute.
             # --------------------------------------------------------
             timed_start_ns = time.perf_counter_ns()
+
+            # --------------------------------------------------------
+            # Public Protein GatedCNN.
+            #
+            # Protein sequences are public, so this is ordinary FP32
+            # CUDA computation rather than MPC.  It is model-involving
+            # computation, therefore it runs AFTER timed_start_ns.
+            #
+            # One worker loads cnn.* once, keeps it resident on GPU,
+            # generates protein_emb.dat for every fixed-B chunk, then
+            # exits before Dealer/Evaluator processes claim the GPUs.
+            # --------------------------------------------------------
+            protein_runtime_us = 0
+
+            if timed_protein:
+                protein_worker = (
+                    repo /
+                    "reference" /
+                    "run_protein_chunks.py"
+                )
+
+                if not protein_worker.is_file():
+                    raise FileNotFoundError(
+                        protein_worker
+                    )
+
+                protein_env = os.environ.copy()
+
+                # The worker sees its selected physical GPU as cuda:0.
+                protein_env[
+                    "CUDA_VISIBLE_DEVICES"
+                ] = str(args.gpu0)
+
+                protein_cmd = [
+                    sys.executable,
+                    str(protein_worker),
+                    "--checkpoint",
+                    str(protein_checkpoint),
+                    "--chunk-root",
+                    str(work_root),
+                    "--chunks",
+                    str(n_chunks),
+                    "--batch",
+                    str(B),
+                    "--scale",
+                    str(args.scale),
+                    "--bw",
+                    str(args.bw),
+                ]
+
+                protein_start_ns = (
+                    time.perf_counter_ns()
+                )
+
+                print(
+                    "[driver] start timed public "
+                    "Protein GatedCNN",
+                    flush=True,
+                )
+
+                protein_proc = subprocess.run(
+                    protein_cmd,
+                    env=protein_env,
+                    text=True,
+                )
+
+                if protein_proc.returncode != 0:
+                    raise RuntimeError(
+                        "timed Protein GatedCNN failed "
+                        f"with rc={protein_proc.returncode}"
+                    )
+
+                protein_end_ns = (
+                    time.perf_counter_ns()
+                )
+
+                protein_runtime_us = (
+                    protein_end_ns -
+                    protein_start_ns
+                ) // 1000
+
+                print(
+                    "[driver] timed public Protein "
+                    "GatedCNN complete: "
+                    f"{protein_runtime_us} us",
+                    flush=True,
+                )
 
             # --------------------------------------------------------
             # Start BOTH persistent Dealers.
@@ -1153,6 +1376,9 @@ def main() -> int:
             timed_wall_us=timed_wall_us,
             dealer_totals=dealer_totals,
             eval_totals=eval_totals,
+            secure_adj_norm=not args.legacy_precomputed_adj,
+            timed_protein=timed_protein,
+            protein_runtime_us=protein_runtime_us,
         )
 
         # ------------------------------------------------------------
