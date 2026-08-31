@@ -334,13 +334,33 @@ public:
         initCPURandomness();
         initGPUMemPool();
 
-        // ── MODIFIED: cap keyBufSize to fit in WSL2 box RAM ─────────────────
-        // Upstream hardcodes 20 GiB; this WSL2 box has 7.6 GiB total.
-        // This model's real keys are << 1 GiB (small batch-1 FCs, 3 GCN layers).
-        // Cap at 2 GiB with env override: DDG_KEYBUF_CAP_GB.
+        // Dealer key buffer.
+        //
+        // The previous 20 GiB hard cap was introduced for an older
+        // small-memory development machine.  BW64 batched DeepDTAGen
+        // needs substantially more key material, so scalability
+        // experiments allow up to 64 GiB.
+        //
+        // 64 GiB is only the hard upper bound.  The actual allocation is
+        // controlled by DDG_KEYBUF_CAP_GB and remains 2 GiB by default.
+        constexpr size_t HARD_CAP_GB = 64;
+
         const char *cap_env = std::getenv("DDG_KEYBUF_CAP_GB");
-        size_t cap_gb = cap_env ? std::atoi(cap_env) : 2;
-        keyBufSize = std::min(20UL * OneGB, cap_gb * OneGB);
+        size_t cap_gb = cap_env
+            ? std::strtoull(cap_env, nullptr, 10)
+            : 2;
+
+        if (cap_gb < 1 || cap_gb > HARD_CAP_GB) {
+            printf("[DDGOrcaKeygen] invalid DDG_KEYBUF_CAP_GB=%zu; "
+                   "valid range is 1..%zu GiB\n",
+                   cap_gb, HARD_CAP_GB);
+            exit(1);
+        }
+
+        keyBufSize = cap_gb * OneGB;
+
+        printf("[DDGOrcaKeygen] key buffer cap = %zu GiB\n",
+               cap_gb);
 
         getAlignedBuf(&keyBuf, keyBufSize, true);
         startPtr = keyBuf;
