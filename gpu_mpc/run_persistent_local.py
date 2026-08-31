@@ -214,13 +214,22 @@ def emit_timing_report(
             f"comm_bytes={e['comm_bytes']}"
         )
 
+    secure_adj_norm = (
+        not args.legacy_precomputed_adj
+    )
+
+    adj_norm_status = (
+        "secure_online"
+        if secure_adj_norm
+        else "precomputed_outside_timed_path"
+    )
+
     print(
         "[DDG_TIME][COMPLIANCE] "
         "status=PRE_COMPLIANCE "
         "public_protein_model="
         "precomputed_outside_timed_path "
-        "secret_adj_norm="
-        "precomputed_outside_timed_path"
+        f"secret_adj_norm={adj_norm_status}"
     )
 
     print(
@@ -269,7 +278,7 @@ def emit_timing_report(
     )
     print()
 
-    print("Competition-timed CURRENT local pipeline")
+    print("Current measured model pipeline")
     print(
         "  wall time             : "
         f"{timed_wall_us / 1e6:.6f} s"
@@ -348,8 +357,12 @@ def emit_timing_report(
         "PRECOMPUTED OUTSIDE TIMED PATH"
     )
     print(
-        "  secure A -> A_norm       : "
-        "PRECOMPUTED OUTSIDE TIMED PATH"
+        "  secure A -> A_norm       : " +
+        (
+            "SECURE ONLINE / INCLUDED"
+            if secure_adj_norm
+            else "PRECOMPUTED OUTSIDE TIMED PATH"
+        )
     )
     print()
 
@@ -403,10 +416,18 @@ def make_fixed_chunk(
             )
 
 
-def base_env(weights: Path) -> dict[str, str]:
+def base_env(
+    weights: Path,
+    secure_adj_norm: bool = True,
+) -> dict[str, str]:
     env = os.environ.copy()
 
     env["DDG_WEIGHTS_BIN"] = str(weights)
+
+    if secure_adj_norm:
+        env["DDG_SECURE_ADJ_NORM"] = "1"
+    else:
+        env.pop("DDG_SECURE_ADJ_NORM", None)
 
     for name in (
         "DDG_SLACK_TRUNC",
@@ -562,6 +583,15 @@ def main() -> int:
     )
 
     ap.add_argument(
+        "--legacy-precomputed-adj",
+        action="store_true",
+        help=(
+            "debug/regression only: input adj files contain legacy "
+            "precomputed Q(scale) A_norm instead of raw scale-0 adjacency"
+        ),
+    )
+
+    ap.add_argument(
         "--allow-many-chunks",
         action="store_true",
         help=(
@@ -653,6 +683,14 @@ def main() -> int:
         print(f"padded N         = {padded_n}")
         print(f"padding samples  = {padded_n - N}")
         print(f"BW / SCALE       = {args.bw} / {args.scale}")
+        print(
+            "adjacency input   = " +
+            (
+                "legacy precomputed A_norm Q(scale)"
+                if args.legacy_precomputed_adj
+                else "raw 0/1 adjacency scale=0; secure A_norm online"
+            )
+        )
         print(f"work root        = {work_root}")
         print(f"key run          = {key_run}")
 
@@ -747,7 +785,10 @@ def main() -> int:
                 (0, args.gpu0),
                 (1, args.gpu1),
             ):
-                env = base_env(weights)
+                env = base_env(
+                    weights,
+                    secure_adj_norm=not args.legacy_precomputed_adj,
+                )
 
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu)
 
@@ -867,7 +908,10 @@ def main() -> int:
                 (0, args.gpu0),
                 (1, args.gpu1),
             ):
-                env = base_env(weights)
+                env = base_env(
+                    weights,
+                    secure_adj_norm=not args.legacy_precomputed_adj,
+                )
 
                 env["CUDA_VISIBLE_DEVICES"] = str(gpu)
 

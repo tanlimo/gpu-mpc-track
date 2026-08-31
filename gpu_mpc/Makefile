@@ -95,7 +95,7 @@ pool_override.o: pool_override.c
 	gcc -O2 -fPIC -I/usr/local/cuda-$(CUDA_VERSION)/include \
 	    -c $(HERE)/pool_override.c -o $(HERE)/pool_override.o
 
-deepdtagen_inference: deepdtagen_inference.cu deepdtagen.h gcn_layer.h masked_maxpool.h ddg_orca.h ddg_orca_base.h ddg_orca_opt.h pool_override.o
+deepdtagen_inference: deepdtagen_inference.cu deepdtagen.h gcn_layer.h masked_maxpool.h secure_adj_norm.h ddg_orca.h ddg_orca_base.h ddg_orca_opt.h pool_override.o
 	$(CXX) $(FLAGS) $(INCLUDES) $(HERE)/deepdtagen_inference.cu $(UTIL_FILES) \
 	    $(HERE)/pool_override.o $(LIBS) \
 	    -o $(HERE)/deepdtagen_inference

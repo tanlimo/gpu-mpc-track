@@ -82,6 +82,77 @@ def count_atoms(smile: str) -> int:
     return mol.GetNumAtoms()
 
 
+
+def smile_to_dense_raw_graph(smile: str, nmax: int = 138):
+    """SMILES -> (X, A_raw, mask) for compliant MPC preprocessing.
+
+    A_raw is the dense 0/1 molecular adjacency with self-loops added on
+    real atoms, but WITHOUT degree normalization.
+
+    This is the representation that may be secret-shared before MPC.
+    D, D^{-1/2}, and A_norm must be derived from secret A_raw inside
+    the timed secure inference path.
+
+    Shapes:
+        X      : (nmax, FEAT_DIM), float32
+        A_raw  : (nmax, nmax),     float32 values in {0,1}
+        mask   : (nmax,),           float32 values in {0,1}
+    """
+    mol = Chem.MolFromSmiles(smile)
+    if mol is None:
+        raise ValueError(
+            f"RDKit could not parse SMILES: {smile!r}"
+        )
+
+    c_size = mol.GetNumAtoms()
+    if c_size > nmax:
+        raise ValueError(
+            f"molecule has {c_size} atoms > nmax={nmax}"
+        )
+
+    # Node features: identical to the legacy/reference path.
+    X = np.zeros(
+        (nmax, FEAT_DIM),
+        dtype=np.float32,
+    )
+
+    for i, atom in enumerate(mol.GetAtoms()):
+        f = atom_features(atom)
+        X[i] = f / f.sum()
+
+    # Unnormalised private adjacency.
+    #
+    # Self-loops are part of the graph representation here.
+    # The forbidden precomputation is degree normalization:
+    #
+    #     D
+    #     D^{-1/2}
+    #     D^{-1/2} A D^{-1/2}
+    #
+    A_raw = np.zeros(
+        (nmax, nmax),
+        dtype=np.float32,
+    )
+
+    for bond in mol.GetBonds():
+        a = bond.GetBeginAtomIdx()
+        b = bond.GetEndAtomIdx()
+
+        A_raw[a, b] = 1.0
+        A_raw[b, a] = 1.0
+
+    for i in range(c_size):
+        A_raw[i, i] = 1.0
+
+    mask = np.zeros(
+        nmax,
+        dtype=np.float32,
+    )
+    mask[:c_size] = 1.0
+
+    return X, A_raw, mask
+
+
 def smile_to_dense_graph(smile: str, nmax: int = 138):
     """SMILES → (X, A_hat, mask) dense fixed-size representation (spec §6)."""
     mol = Chem.MolFromSmiles(smile)

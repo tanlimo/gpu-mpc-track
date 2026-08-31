@@ -24,7 +24,10 @@ import os
 import numpy as np
 
 from reference import mpc_config
-from reference.dense_graph import smile_to_dense_graph
+from reference.dense_graph import (
+    smile_to_dense_graph,
+    smile_to_dense_raw_graph,
+)
 
 U64_MOD = 1 << 64
 U32_MOD = 1 << 32
@@ -105,7 +108,7 @@ def _write_pair(x_float, out_dir: str, tensor: str, scale: int, seed: int,
     s1.astype(dtype_str).tofile(os.path.join(out_dir, mpc_config.share_filename(tensor, 1)))
 
 
-def share_drug_graph(smile: str, out_dir: str,
+def share_drug_graph_legacy_normalized(smile: str, out_dir: str,
                      scale: int = DEFAULT_SCALE, nmax: int = 138,
                      seed: int = 0, pool_dim: int = 376,
                      bw: int = DEFAULT_BW):
@@ -134,3 +137,138 @@ def share_drug_graph(smile: str, out_dir: str,
     return {"nmax": nmax, "scale": scale, "mask_scale": MASK_SCALE, "pool_dim": pool_dim, "bw": bw,
             "shapes": {"x": list(X.shape), "adj": list(A_hat.shape),
                        "mask": list(mask_tiled.shape)}}
+
+
+
+def share_drug_graph_raw_adj(
+    smile: str,
+    out_dir: str,
+    scale: int = DEFAULT_SCALE,
+    nmax: int = 138,
+    seed: int = 0,
+    pool_dim: int = 376,
+    bw: int = DEFAULT_BW,
+):
+    """Secret-share drug inputs for the compliant raw-adjacency path.
+
+    Differences from legacy share_drug_graph():
+
+      x:
+        fixed-point scale = `scale` (normally Q12)
+
+      adj:
+        RAW 0/1 adjacency with real-node self-loops
+        scale = 0
+
+      mask:
+        binary node mask
+        scale = 0
+
+    No degree, inverse-square-root degree, or normalized adjacency
+    is computed here. Those are derived from secret adjacency inside
+    the timed MPC inference path.
+    """
+
+    X, A_raw, mask = smile_to_dense_raw_graph(
+        smile,
+        nmax,
+    )
+
+    mask_tiled = np.broadcast_to(
+        mask.reshape(nmax, 1),
+        (nmax, pool_dim),
+    )
+
+    _write_pair(
+        X,
+        out_dir,
+        "x",
+        scale,
+        seed + 0,
+        bw=bw,
+    )
+
+    # IMPORTANT:
+    # raw adjacency is an integer/binary tensor.
+    _write_pair(
+        A_raw,
+        out_dir,
+        "adj",
+        0,
+        seed + 1,
+        bw=bw,
+    )
+
+    _write_pair(
+        mask_tiled,
+        out_dir,
+        "mask",
+        MASK_SCALE,
+        seed + 2,
+        bw=bw,
+    )
+
+    return {
+        "nmax": nmax,
+        "scale": scale,
+        "adj_scale": 0,
+        "mask_scale": MASK_SCALE,
+        "pool_dim": pool_dim,
+        "bw": bw,
+        "adj_semantics": (
+            "raw_binary_adjacency_with_self_loops"
+        ),
+        "shapes": {
+            "x": list(X.shape),
+            "adj": list(A_raw.shape),
+            "mask": list(mask_tiled.shape),
+        },
+    }
+
+
+
+def share_drug_graph(
+    smile: str,
+    out_dir: str,
+    scale: int = DEFAULT_SCALE,
+    nmax: int = 138,
+    seed: int = 0,
+    pool_dim: int = 376,
+    bw: int = DEFAULT_BW,
+):
+    """Production DeepDTAGen MPC input contract.
+
+    Confidential drug tensors:
+
+      x:
+        fixed-point Q(scale)
+
+      adj:
+        raw dense 0/1 adjacency including real-node self loops
+        scale = 0
+
+      mask:
+        binary node mask
+        scale = 0
+
+    Degree normalization is deliberately NOT performed here.
+
+    D, D^{-1/2}, and
+
+        A_norm = D^{-1/2} A D^{-1/2}
+
+    are derived from the secret shares of raw A inside the
+    timed MPC inference path.
+
+    For historical regression only, use
+    share_drug_graph_legacy_normalized().
+    """
+    return share_drug_graph_raw_adj(
+        smile=smile,
+        out_dir=out_dir,
+        scale=scale,
+        nmax=nmax,
+        seed=seed,
+        pool_dim=pool_dim,
+        bw=bw,
+    )

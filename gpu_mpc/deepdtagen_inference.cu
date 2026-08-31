@@ -44,6 +44,7 @@
 
 #include "ddg_orca.h"  // Forked Orca backend with mul/scalarmul for graph models
 #include "ddg_orca_batched.h"  // Optimized backend with LocalARS truncation
+#include "secure_adj_norm.h"
 #include "deepdtagen.h"
 
 #ifndef InfType
@@ -592,8 +593,51 @@ int main(int argc, char *argv[])
                 auto profDealerKeygenStart =
                     std::chrono::high_resolution_clock::now();
 
+                // ----------------------------------------------------
+                // Compliance path:
+                //
+                // adj_share0 contains the preprocessing mask/share0 of
+                // RAW unnormalised adjacency (scale 0).
+                //
+                // Generate preprocessing material for:
+                //
+                //   secret A_raw
+                //      -> secret degree
+                //      -> secure 8-bit inverse-sqrt LUT
+                //      -> secure A_norm (Qscale)
+                //
+                // The returned tensor is the preprocessing mask of
+                // A_norm and is then consumed by the existing GCN
+                // key-generation graph.
+                //
+                // Keep the legacy pre-normalised A_hat path available
+                // while correctness regression is in progress.
+                // ----------------------------------------------------
+                InfType *d_A_norm_mask = nullptr;
+
+                if (std::getenv("DDG_SECURE_ADJ_NORM")) {
+                    d_A_norm_mask =
+                        ddgSecureAdjNormKeygen<InfType>(
+                            &fss->keyBuf,
+                            party,
+                            bw,
+                            (int)scale,
+                            &fss->g,
+                            d_A_hat_input,
+                            BATCH,
+                            Nmax
+                        );
+
+                    A_hat.d_data = d_A_norm_mask;
+                }
+
                 auto &out = model->forward(X);
                 fss->output(out);
+
+                if (d_A_norm_mask != nullptr) {
+                    gpuFree(d_A_norm_mask);
+                    d_A_norm_mask = nullptr;
+                }
 
                 auto profDealerKeygenEnd =
                     std::chrono::high_resolution_clock::now();
@@ -1307,9 +1351,20 @@ int main(int argc, char *argv[])
                 fss->sxsMatmulIdx = 0;
                 fss->resetLeaves();
 
+                const bool secureAdjNorm =
+                    std::getenv("DDG_SECURE_ADJ_NORM") != nullptr;
+
                 if (BATCH == 1) {
                     fss->registerLeaf(X.d_data);
-                    fss->registerLeaf(A_hat.d_data);
+
+                    // Legacy path consumes precomputed secret A_hat.
+                    // Secure-adj-normalization mode instead consumes
+                    // raw A inside ddgSecureAdjNormEval(), so the
+                    // resulting A_norm must NOT be registered again.
+                    if (!secureAdjNorm) {
+                        fss->registerLeaf(A_hat.d_data);
+                    }
+
                     fss->registerLeaf(maskTiled.d_data);
                     fss->registerLeaf(proteinEmb.d_data);
                 }
@@ -1321,11 +1376,13 @@ int main(int argc, char *argv[])
                         );
                     }
 
-                    for (int b = 0; b < BATCH; ++b) {
-                        fss->registerLeaf(
-                            A_hat.d_data +
-                            b * Nmax * Nmax
-                        );
+                    if (!secureAdjNorm) {
+                        for (int b = 0; b < BATCH; ++b) {
+                            fss->registerLeaf(
+                                A_hat.d_data +
+                                b * Nmax * Nmax
+                            );
+                        }
                     }
 
                     fss->registerLeaf(
@@ -1361,8 +1418,47 @@ int main(int argc, char *argv[])
                 auto start =
                     std::chrono::high_resolution_clock::now();
 
+                // ----------------------------------------------------
+                // Secure online graph normalization.
+                //
+                // Input:
+                //   A_hat.d_data currently carries this party's RAW
+                //   adjacency share (scale 0).
+                //
+                // Output:
+                //   masked-public normalized adjacency at Q(scale).
+                //
+                // This is deliberately inside the measured compute
+                // interval because D and D^{-1/2} are model-involving
+                // secure computation.
+                // ----------------------------------------------------
+                InfType *d_A_norm = nullptr;
+
+                if (secureAdjNorm) {
+                    d_A_norm =
+                        ddgSecureAdjNormEval<InfType>(
+                            &fss->keyBuf,
+                            fss->peer,
+                            party,
+                            bw,
+                            (int)scale,
+                            &fss->g,
+                            &fss->s,
+                            d_A_hat_work,
+                            BATCH,
+                            Nmax
+                        );
+
+                    A_hat.d_data = d_A_norm;
+                }
+
                 auto &out = model->forward(X);
                 fss->output(out);
+
+                if (d_A_norm != nullptr) {
+                    gpuFree(d_A_norm);
+                    d_A_norm = nullptr;
+                }
 
                 auto end =
                     std::chrono::high_resolution_clock::now();
