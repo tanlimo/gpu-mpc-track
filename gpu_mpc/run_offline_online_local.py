@@ -599,19 +599,319 @@ def main() -> int:
         )
 
         # --------------------------------------------------------
-        # ONLINE timing begins here.
+        # Evaluator SETUP.
         #
-        # Dealer is already gone.
+        # This phase is intentionally outside ONLINE_COMPUTE:
+        #   * evaluator process launch
+        #   * CUDA/backend initialization
+        #   * full FSS key preload
+        #   * peer connection
+        #   * READY synchronization
         #
-        # Current baseline still performs key-file reads inside
-        # online timing.  RAM preload will be added next.
+        # It is still reported separately and is included in
+        # END_TO_END.  PRE_COMPLIANCE remains in effect because
+        # official treatment of model-specific FSS preprocessing
+        # is not assumed here.
         # --------------------------------------------------------
+        key_dir_arg = (
+            str(key_dir) +
+            "/"
+        )
+
+        ready_files = {
+            0: work_root / "eval_p0.ready",
+            1: work_root / "eval_p1.ready",
+        }
+
+        start_file = (
+            work_root /
+            "evaluators.start"
+        )
+
+        for path in (
+            ready_files[0],
+            ready_files[1],
+            start_file,
+        ):
+            path.unlink(
+                missing_ok=True
+            )
+
+        setup_start_ns = (
+            time.perf_counter_ns()
+        )
+
+        end_to_end_start_ns = (
+            setup_start_ns
+        )
+
+        print(
+            "[driver] SETUP: start Evaluators "
+            "for full-key preload / peer setup",
+            flush=True,
+        )
+
+        for party, gpu in (
+            (0, args.gpu0),
+            (1, args.gpu1),
+        ):
+            env = base_env(
+                weights,
+                secure_adj_norm=secure_adj_norm,
+            )
+
+            env[
+                "CUDA_VISIBLE_DEVICES"
+            ] = str(gpu)
+
+            env[
+                "DDG_EVAL_CHUNK_ROOT"
+            ] = str(work_root)
+
+            env[
+                "DDG_EVAL_CHUNKS"
+            ] = str(chunks)
+
+            # READY is party-specific; START is shared.
+            env[
+                "DDG_EVAL_READY_FILE"
+            ] = str(
+                ready_files[party]
+            )
+
+            env[
+                "DDG_EVAL_START_FILE"
+            ] = str(
+                start_file
+            )
+
+            if args.full_key_ram:
+                env[
+                    "DDG_EVAL_FULL_KEY_RAM"
+                ] = "1"
+            else:
+                env.pop(
+                    "DDG_EVAL_FULL_KEY_RAM",
+                    None,
+                )
+
+            # Explicitly guarantee full-file mode rather than
+            # the old bounded Dealer/Evaluator streaming path.
+            for name in (
+                "DDG_EVAL_EXTERNAL_KEY_IO",
+                "DDG_KEY_SLOT_ROOT",
+                "DDG_EVAL_KEY_CHUNK_BYTES",
+            ):
+                env.pop(
+                    name,
+                    None,
+                )
+
+            cmd = [
+                str(binary),
+                str(args.bw),
+                str(args.scale),
+                "1",              # evaluator only
+                str(party),
+                key_dir_arg,
+                str(chunk0),
+                str(B),
+                args.ip,
+            ]
+
+            log = (
+                logs /
+                f"eval_p{party}.log"
+            )
+
+            # Keep the historical connection-safety delay for now.
+            #
+            # IMPORTANT:
+            # this is SETUP, not ONLINE_COMPUTE.
+            #
+            # We will remove/reduce it only after confirming the
+            # GpuPeer connection implementation safely retries.
+            if party == 1:
+                time.sleep(1.0)
+
+            print(
+                f"[driver] SETUP: start "
+                f"Evaluator P{party}",
+                flush=True,
+            )
+
+            fh = log.open("w")
+
+            proc = subprocess.Popen(
+                cmd,
+                env=env,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+            eval_files[party] = fh
+            eval_procs[party] = proc
+
+        # --------------------------------------------------------
+        # Wait until BOTH Evaluators report READY.
+        #
+        # Unlike the previous experiment, do not blindly wait for
+        # marker files.  If either process exits, fail immediately
+        # and show its log rather than waiting for a long timeout.
+        # --------------------------------------------------------
+        ready_deadline = (
+            time.monotonic() +
+            600.0
+        )
+
+        while True:
+            ready0 = (
+                ready_files[0].exists()
+            )
+
+            ready1 = (
+                ready_files[1].exists()
+            )
+
+            if ready0 and ready1:
+                break
+
+            failed_party = None
+            failed_rc = None
+
+            for party in (0, 1):
+                rc = (
+                    eval_procs[party].
+                    poll()
+                )
+
+                if rc is not None:
+                    failed_party = party
+                    failed_rc = rc
+                    break
+
+            if failed_party is not None:
+                # Stop the other evaluator if it is still alive.
+                for party in (0, 1):
+                    proc = eval_procs[party]
+
+                    if proc.poll() is None:
+                        proc.terminate()
+
+                for party in (0, 1):
+                    try:
+                        eval_procs[party].wait(
+                            timeout=5
+                        )
+                    except subprocess.TimeoutExpired:
+                        eval_procs[party].kill()
+                        eval_procs[party].wait()
+
+                for party in (0, 1):
+                    eval_files[party].close()
+
+                print()
+                print(
+                    f"[driver] ERROR: Evaluator "
+                    f"P{failed_party} exited before READY "
+                    f"with rc={failed_rc}"
+                )
+
+                for party in (0, 1):
+                    print()
+                    print(
+                        "===== "
+                        f"EVALUATOR P{party} LOG TAIL "
+                        "====="
+                    )
+
+                    print_log_tail(
+                        logs /
+                        f"eval_p{party}.log"
+                    )
+
+                raise RuntimeError(
+                    "evaluator exited before READY"
+                )
+
+            if (
+                time.monotonic() >=
+                ready_deadline
+            ):
+                for party in (0, 1):
+                    proc = eval_procs[party]
+
+                    if proc.poll() is None:
+                        proc.terminate()
+
+                for party in (0, 1):
+                    try:
+                        eval_procs[party].wait(
+                            timeout=5
+                        )
+                    except subprocess.TimeoutExpired:
+                        eval_procs[party].kill()
+                        eval_procs[party].wait()
+
+                for party in (0, 1):
+                    eval_files[party].close()
+
+                for party in (0, 1):
+                    print()
+                    print(
+                        "===== "
+                        f"EVALUATOR P{party} LOG TAIL "
+                        "====="
+                    )
+
+                    print_log_tail(
+                        logs /
+                        f"eval_p{party}.log"
+                    )
+
+                raise RuntimeError(
+                    "timeout waiting for evaluator READY"
+                )
+
+            time.sleep(0.01)
+
+        setup_end_ns = (
+            time.perf_counter_ns()
+        )
+
+        setup_wall_us = (
+            setup_end_ns -
+            setup_start_ns
+        ) // 1000
+
+        print(
+            "[driver] SETUP: both Evaluators READY: "
+            f"{setup_wall_us} us",
+            flush=True,
+        )
+
+        # ========================================================
+        # ONLINE COMPUTE START.
+        #
+        # Everything above is setup.
+        #
+        # From here onward:
+        #   public Protein model
+        #   + secure adjacency normalization
+        #   + 2PC affinity inference
+        # are included.
+        # ========================================================
         online_start_ns = (
             time.perf_counter_ns()
         )
 
         # --------------------------------------------------------
         # Timed public Protein GatedCNN.
+        #
+        # We conservatively keep Python worker startup/checkpoint
+        # loading in the online wall for now.  A persistent Protein
+        # worker can be optimized separately later.
         # --------------------------------------------------------
         protein_env = os.environ.copy()
 
@@ -653,6 +953,26 @@ def main() -> int:
         )
 
         if protein_proc.returncode != 0:
+            # Evaluators are still waiting at START.
+            # Do not leave them behind.
+            for party in (0, 1):
+                proc = eval_procs[party]
+
+                if proc.poll() is None:
+                    proc.terminate()
+
+            for party in (0, 1):
+                try:
+                    eval_procs[party].wait(
+                        timeout=5
+                    )
+                except subprocess.TimeoutExpired:
+                    eval_procs[party].kill()
+                    eval_procs[party].wait()
+
+            for party in (0, 1):
+                eval_files[party].close()
+
             raise RuntimeError(
                 "timed Protein GatedCNN failed: "
                 f"rc={protein_proc.returncode}"
@@ -674,102 +994,18 @@ def main() -> int:
         )
 
         # --------------------------------------------------------
-        # Start ONLY the two Evaluators.
-        #
-        # No:
-        #   DDG_EVAL_EXTERNAL_KEY_IO
-        #   DDG_KEY_SLOT_ROOT
-        #
-        # Therefore the evaluator consumes the complete
-        # sequential party key file generated offline.
+        # Protein outputs are now present for every chunk.
+        # Release both Evaluators simultaneously into MPC.
         # --------------------------------------------------------
-        key_dir_arg = (
-            str(key_dir) +
-            "/"
+        start_file.write_text(
+            "1\n"
         )
 
-        for party, gpu in (
-            (0, args.gpu0),
-            (1, args.gpu1),
-        ):
-            env = base_env(
-                weights,
-                secure_adj_norm=secure_adj_norm,
-            )
-
-            env[
-                "CUDA_VISIBLE_DEVICES"
-            ] = str(gpu)
-
-            env[
-                "DDG_EVAL_CHUNK_ROOT"
-            ] = str(work_root)
-
-            env[
-                "DDG_EVAL_CHUNKS"
-            ] = str(chunks)
-
-            if args.full_key_ram:
-                env[
-                    "DDG_EVAL_FULL_KEY_RAM"
-                ] = "1"
-            else:
-                env.pop(
-                    "DDG_EVAL_FULL_KEY_RAM",
-                    None,
-                )
-
-            # Explicitly guarantee full-file sequential mode.
-            for name in (
-                "DDG_EVAL_EXTERNAL_KEY_IO",
-                "DDG_KEY_SLOT_ROOT",
-                "DDG_EVAL_KEY_CHUNK_BYTES",
-            ):
-                env.pop(
-                    name,
-                    None,
-                )
-
-            cmd = [
-                str(binary),
-                str(args.bw),
-                str(args.scale),
-                "1",              # evaluator only
-                str(party),
-                key_dir_arg,
-                str(chunk0),
-                str(B),
-                args.ip,
-            ]
-
-            log = (
-                logs /
-                f"eval_p{party}.log"
-            )
-
-            # Current GpuPeer convention:
-            # P0 is started first, then P1 connects.
-            if party == 1:
-                time.sleep(1.0)
-
-            print(
-                f"[driver] ONLINE: start "
-                f"Evaluator P{party}",
-                flush=True,
-            )
-
-            fh = log.open("w")
-
-            proc = subprocess.Popen(
-                cmd,
-                env=env,
-                stdout=fh,
-                stderr=subprocess.STDOUT,
-                text=True,
-            )
-
-            eval_files[party] = fh
-            eval_procs[party] = proc
+        print(
+            "[driver] ONLINE: release Evaluators "
+            "with START marker",
+            flush=True,
+        )
 
         e0_rc = eval_procs[0].wait()
         e1_rc = eval_procs[1].wait()
@@ -781,9 +1017,18 @@ def main() -> int:
             time.perf_counter_ns()
         )
 
+        end_to_end_end_ns = (
+            online_end_ns
+        )
+
         online_wall_us = (
             online_end_ns -
             online_start_ns
+        ) // 1000
+
+        end_to_end_us = (
+            end_to_end_end_ns -
+            end_to_end_start_ns
         ) // 1000
 
         print(
@@ -812,10 +1057,12 @@ def main() -> int:
         # --------------------------------------------------------
         # Parse direct full-RAM preload metadata.
         #
-        # Current runner starts evaluators AFTER online_start_ns,
-        # so preload is still included in ONLINE_TOTAL.
-        # A later READY/START launcher may move this phase outside
-        # the online wall, but reporting remains explicit either way.
+        # Evaluators are now started during SETUP and reach READY
+        # only after backend/peer initialization and, in full-RAM
+        # mode, complete direct key preload.
+        #
+        # Therefore full-RAM preload is outside ONLINE_COMPUTE,
+        # but remains visible in SETUP_TOTAL and END_TO_END.
         # --------------------------------------------------------
         preload_info = {}
 
@@ -952,7 +1199,7 @@ def main() -> int:
 
         print(
             "[DDG_TIME][SCHEMA] "
-            "version=3 "
+            "version=4 "
             "status=PRE_COMPLIANCE "
             "key_mode=" +
             (
@@ -996,8 +1243,17 @@ def main() -> int:
                     f"chunk_bytes={pi['chunk_bytes']} "
                     f"runtime_us={pi['runtime_us']} "
                     f"mode={pi['mode']} "
-                    "included_in_online_wall=1"
+                    "included_in_online_wall=0 "
+                    "included_in_setup_wall=1"
                 )
+
+        print(
+            "[DDG_TIME][SETUP_TOTAL] "
+            "status=PRE_COMPLIANCE "
+            f"runtime_us={setup_wall_us} "
+            "included_in_online_compute=0 "
+            "included_in_end_to_end=1"
+        )
 
         print(
             "[DDG_TIME][PROTEIN] "
@@ -1032,9 +1288,9 @@ def main() -> int:
             "key_distribution=offline_reported_separately "
             "key_preload=" +
             (
-                "direct_full_ram_in_online_wall "
+                "direct_full_ram_setup_reported_separately "
                 if args.full_key_ram
-                else "sequential_file_reads_in_online_wall "
+                else "sequential_file_reads_in_online_compute "
             ) +
             "public_protein_model=timed_fp32_gpu "
             "secret_adj_norm=" +
@@ -1046,7 +1302,23 @@ def main() -> int:
         )
 
         print(
-            "[DDG_TIME][ONLINE_TOTAL] "
+            "[DDG_TIME][END_TO_END] "
+            "status=PRE_COMPLIANCE "
+            "scope=setup_plus_online "
+            f"samples={N} "
+            f"micro_batch={B} "
+            f"chunks={chunks} "
+            f"runtime_us={end_to_end_us} "
+            f"throughput_samples_s="
+            f"{N * 1_000_000.0 / end_to_end_us:.6f} "
+            "includes_preprocess=0 "
+            "includes_offline_dealer=0 "
+            "includes_setup=1 "
+            "includes_online_compute=1"
+        )
+
+        print(
+            "[DDG_TIME][ONLINE_COMPUTE] "
             "status=PRE_COMPLIANCE "
             f"samples={N} "
             f"micro_batch={B} "
@@ -1056,7 +1328,7 @@ def main() -> int:
             f"scale={args.scale} "
             f"key_chunk_bytes="
             f"{key_chunk_bytes} "
-            f"online_wall_us="
+            f"runtime_us="
             f"{online_wall_us} "
             f"throughput_samples_s="
             f"{throughput:.6f} "

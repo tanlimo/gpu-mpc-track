@@ -937,15 +937,43 @@ int main(int argc, char *argv[])
     }
     else
     {
+        // Detect persistent evaluator mode before loading inputs.
+        //
+        // In persistent mode protein_emb.dat is produced later by the
+        // timed public Protein GatedCNN and is loaded per chunk inside
+        // the persistent evaluator loop.  Therefore evaluator setup
+        // must not require protein_emb.dat to already exist.
+        const char *evalChunkRootEnv =
+            std::getenv("DDG_EVAL_CHUNK_ROOT");
+
+        const bool persistentEval =
+            evalChunkRootEnv &&
+            evalChunkRootEnv[0];
+
         // Evaluator: load this party's real secret shares, then run online.
-        //  P1 secrets (drug graph): X, A_hat, maskTiled — both parties hold a share.
+        // P1 secrets (drug graph): X, A_hat, maskTiled — both parties hold a share.
         loadShare(shareDir + "/x_share"    + std::to_string(party) + ".dat", X);
         loadShare(shareDir + "/adj_share"  + std::to_string(party) + ".dat", A_hat);
         loadShare(shareDir + "/mask_share" + std::to_string(party) + ".dat", maskTiled);
-        //  P2 public constant (GatedCNN output): P2 holds the value, P1 holds
-        //  zero. Load only on party 1; party 0's tensor stays zeroed.
-        if (party == 1)
-            loadShare(shareDir + "/protein_emb.dat", proteinEmb);
+        // P2 public constant (GatedCNN output):
+        // party 1 holds P, party 0 holds zero.
+        //
+        // One-shot mode:
+        //   protein_emb.dat already exists and may be loaded here.
+        //
+        // Persistent mode:
+        //   Protein is generated later.  The persistent chunk loop
+        //   loads chunk_xxxxx/protein_emb.dat immediately before the
+        //   corresponding MPC forward.
+        if (persistentEval) {
+            proteinEmb.zero();
+        }
+        else if (party == 1) {
+            loadShare(
+                shareDir + "/protein_emb.dat",
+                proteinEmb
+            );
+        }
 
         auto ip = (argc > 8) ? argv[8] : "127.0.0.1";
 
@@ -958,9 +986,6 @@ int main(int argc, char *argv[])
         }
         model->setBackend(fss);
         model->optimize();
-
-        const char *evalChunkRootEnv =
-            std::getenv("DDG_EVAL_CHUNK_ROOT");
 
         // Persistent fixed-shape evaluator.
         //
@@ -1134,6 +1159,72 @@ int main(int argc, char *argv[])
                     perror("lseek");
                     exit(1);
                 }
+            }
+
+            // --------------------------------------------------------
+            // Optional persistent-evaluator READY/START barrier.
+            //
+            // READY means:
+            //   evaluator process is alive,
+            //   backend/peer setup has completed,
+            //   and full FSS keys (when enabled) are already resident.
+            //
+            // START means:
+            //   the launcher has completed online prerequisites
+            //   such as public Protein GatedCNN and now releases
+            //   both evaluators into MPC computation.
+            //
+            // If neither environment variable is provided, historical
+            // behavior remains unchanged.
+            // --------------------------------------------------------
+            const char *evalReadyFileEnv =
+                std::getenv("DDG_EVAL_READY_FILE");
+
+            const char *evalStartFileEnv =
+                std::getenv("DDG_EVAL_START_FILE");
+
+            const bool hasReadyFile =
+                evalReadyFileEnv &&
+                evalReadyFileEnv[0];
+
+            const bool hasStartFile =
+                evalStartFileEnv &&
+                evalStartFileEnv[0];
+
+            if (hasReadyFile != hasStartFile) {
+                fprintf(
+                    stderr,
+                    "[DeepDTAGen] DDG_EVAL_READY_FILE and "
+                    "DDG_EVAL_START_FILE must be set together\n"
+                );
+                exit(1);
+            }
+
+            if (hasReadyFile) {
+                ddgCreateMarker(
+                    std::string(evalReadyFileEnv)
+                );
+
+                printf(
+                    "[DDG_BARRIER][READY] "
+                    "party=%d file=%s\n",
+                    party,
+                    evalReadyFileEnv
+                );
+                fflush(stdout);
+
+                ddgWaitForFile(
+                    std::string(evalStartFileEnv),
+                    "online START marker"
+                );
+
+                printf(
+                    "[DDG_BARRIER][START] "
+                    "party=%d file=%s\n",
+                    party,
+                    evalStartFileEnv
+                );
+                fflush(stdout);
             }
 
             for (int chunk = 0; chunk < nChunks; ++chunk) {
