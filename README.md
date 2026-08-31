@@ -1775,7 +1775,7 @@ The currently validated local topology uses two GPUs on one physical host:
 Evaluator P0 → GPU 0
 Evaluator P1 → GPU 1
 peer IP      → 127.0.0.1
-peer port    → 42003
+peer ports   → 42003 / 42006
 ```
 
 Run:
@@ -1905,55 +1905,386 @@ Important parameters:
 | `--full-key-ram` | preload complete key file |
 | `--keep-work` | retain debug files |
 
-The current backend uses TCP port:
+The current GPU-MPC backend uses two TCP ports:
 
 ```text
 42003
+42006
 ```
+
+The secondary connection uses the backend default `port + 3`.
 
 ---
 
 ## 8.5 Two-server deployment
 
-The intended deployment is:
+The repository provides a per-party online launcher:
 
 ```text
-                 TRUSTED OFFLINE SETUP
-
-                         Dealer
-                        /      \
-                      K0        K1
-                      │          │
-                      ▼          ▼
-
-                    ONLINE
-
-             Server P0 <----> Server P1
-             ---------        ---------
-             share0           share1
-             K0               K1
-             public model     public model
-             public protein   public protein
+gpu_mpc/run_offline_online_party.py
 ```
 
-Before online execution:
+It is intended to run independently on the two online MPC servers.
 
-1. prepare the dataset;
-2. generate the two drug shares;
-3. generate `K0` and `K1` on the trusted Dealer environment;
-4. copy only share0 and `K0` to Server P0;
-5. copy only share1 and `K1` to Server P1;
-6. copy public model/protein assets to both servers;
-7. confirm network access on the MPC port;
-8. start the two Evaluators.
+The per-party launcher has been validated using two isolated party directories,
+two independent Python launcher processes, and two GPUs on the same host.
 
-> **TODO before final submission**
+> **Physical two-host status: NOT YET VALIDATED**
 >
-> Insert the final copy-paste commands for the physical two-server runner after the current READY/START full-RAM architecture has been validated on two independent machines.
->
-> Do not present the current localhost launcher as a verified two-server production launcher until that test is complete.
+> The launcher interface and party isolation have been validated locally, but
+> the current results must not be presented as physical cross-machine network
+> measurements until the same commands have been executed on two independent
+> servers.
 
----
+### 8.5.1 Intended deployment
+
+```text
+                      OFFLINE
+
+                 trusted Dealer
+                    /       \
+                   K0       K1
+                   |         |
+              Dealer exits completely
+
+
+                       ONLINE
+
+          Server P0                  Server P1
+        ---------------            ---------------
+        drug share0                 drug share1
+        K0                          K1
+        public weights              public weights
+                                    public protein
+                                    public checkpoint
+
+              |                         |
+              +------ GPU-MPC ----------+
+                    TCP 42003 / 42006
+
+              +--- launcher control ----+
+                     TCP 42004
+```
+
+The Dealer is not an online MPC party.
+
+For final physical deployment:
+
+```text
+Server P0 must not contain share1 or K1.
+Server P1 must not contain share0 or K0.
+```
+
+The public model parameters and public Protein input may be distributed as
+needed.
+
+### 8.5.2 Network convention
+
+The current GPU-MPC backend establishes two TCP connections:
+
+```text
+TCP 42003
+TCP 42006
+```
+
+The second GPU-MPC connection uses the backend default `port + 3`.
+
+The per-party launcher coordination channel uses:
+
+```text
+TCP 42004
+```
+
+Therefore the complete current network interface is:
+
+```text
+TCP 42003    GPU-MPC data channel
+TCP 42006    GPU-MPC secondary data channel
+TCP 42004    per-party launcher control channel
+```
+
+Party convention:
+
+```text
+P0:
+    listens for GPU-MPC connections on TCP 42003 and 42006
+    listens for the launcher control connection on TCP 42004
+
+P1:
+    connects to Server P0 on TCP 42003 and 42006
+    connects to Server P0 on TCP 42004 for launcher coordination
+```
+
+Therefore `--peer-ip` must be the address of Server P0 that is reachable from
+Server P1.
+
+The underlying GPU-MPC `Peer` client retries failed connection attempts until
+the P0 listener becomes available. Therefore the per-party launcher does not
+require a fixed startup delay under normal operation.
+
+On a physical deployment, the firewall/security-group configuration must allow
+Server P1 to reach Server P0 on all of the following TCP ports:
+
+```text
+42003
+42004
+42006
+```
+
+### 8.5.3 Server P0
+
+Assume:
+
+```bash
+export SERVER0_IP="<SERVER0_REACHABLE_IP>"
+
+export P0_SOURCE="<P0_PREPARED_INPUT_DIRECTORY>"
+export P0_KEYS="<P0_OFFLINE_KEY_DIRECTORY>"
+
+export WEIGHTS="<PATH_TO_weights.bin>"
+
+export N=8
+export B=8
+```
+
+The P0 source directory needs only the P0 private input shares:
+
+```text
+metadata.json
+x_share0.dat
+adj_share0.dat
+mask_share0.dat
+```
+
+The P0 key directory needs:
+
+```text
+metadata.json
+DeepDTAGen_64_12_party0_inference_key0.dat
+```
+
+Start Server P0:
+
+```bash
+python3 gpu_mpc/run_offline_online_party.py \
+  "$P0_SOURCE" \
+  "$WEIGHTS" \
+  "$P0_KEYS" \
+  --party 0 \
+  --peer-ip "$SERVER0_IP" \
+  --num-samples "$N" \
+  --micro-batch "$B" \
+  --bw 64 \
+  --scale 12 \
+  --gpu 0 \
+  --control-bind 0.0.0.0 \
+  --control-port 42004 \
+  --full-key-ram
+```
+
+P0 waits for Server P1 and automatically coordinates the READY/START lifecycle.
+
+The optional `--peer-start-delay` argument defaults to `0.0`. The underlying
+GPU-MPC peer client retries failed connection attempts until the P0 listener is
+available, so a fixed launcher-side delay is not required for normal deployment.
+
+
+### 8.5.4 Server P1
+
+Assume:
+
+```bash
+export SERVER0_IP="<SERVER0_REACHABLE_IP>"
+
+export P1_SOURCE="<P1_PREPARED_INPUT_DIRECTORY>"
+export P1_KEYS="<P1_OFFLINE_KEY_DIRECTORY>"
+
+export WEIGHTS="<PATH_TO_weights.bin>"
+export CHECKPOINT="<PATH_TO_DEEPDTAGEN_CHECKPOINT>"
+
+export N=8
+export B=8
+```
+
+The P1 source directory needs:
+
+```text
+metadata.json
+x_share1.dat
+adj_share1.dat
+mask_share1.dat
+target_ids.dat
+```
+
+`target_ids.dat` represents the public Protein input.
+
+The P1 key directory needs:
+
+```text
+metadata.json
+DeepDTAGen_64_12_party1_inference_key1.dat
+```
+
+Start Server P1 after P0 is running:
+
+```bash
+python3 gpu_mpc/run_offline_online_party.py \
+  "$P1_SOURCE" \
+  "$WEIGHTS" \
+  "$P1_KEYS" \
+  --party 1 \
+  --peer-ip "$SERVER0_IP" \
+  --protein-checkpoint "$CHECKPOINT" \
+  --num-samples "$N" \
+  --micro-batch "$B" \
+  --bw 64 \
+  --scale 12 \
+  --gpu 0 \
+  --control-port 42004 \
+  --full-key-ram
+```
+
+The launcher automatically performs:
+
+```text
+P0 evaluator launch
+        |
+        v
+P1 evaluator launch
+        |
+        v
+full-key preload
+        |
+        v
+P0 READY + P1 READY
+        |
+        v
+public Protein Gated-CNN on P1
+        |
+        v
+distributed START release
+        |
+        v
+secure A -> A_norm
+        |
+        v
+2PC DeepDTAGen affinity inference
+```
+
+No manual filesystem START coordination between the two servers is required.
+
+### 8.5.5 Local isolated deployment validation
+
+The per-party launcher was validated with two independent processes on the
+current two-GPU development host.
+
+The validation used separate party-specific input directories:
+
+```text
+P0:
+    share0 only
+    K0 only
+    GPU 0
+
+P1:
+    share1 only
+    K1 only
+    public target_ids.dat
+    GPU 1
+```
+
+Configuration:
+
+```text
+logical N       = 3
+micro-batch B   = 8
+chunks          = 1
+padded N        = 8
+BW / SCALE      = 64 / 12
+secure A_norm   = enabled
+full-key RAM    = enabled
+```
+
+The P0 result was:
+
+```text
+AFFINITY_GLOBAL[0]=11.827393
+AFFINITY_GLOBAL[1]=11.977295
+AFFINITY_GLOBAL[2]=11.341064
+
+PASS: distributed per-party runner N=3, B=8, chunks=1, returned=3
+OFFLINE/ONLINE SEPARATION: PASS
+Dealer process was never started.
+```
+
+P1 completed independently with:
+
+```text
+PARTY 1: PASS
+```
+
+These predictions exactly match the latest validated localhost
+`run_offline_online_local.py` smoke test.
+
+This validates:
+
+```text
+independent party launchers                 PASS
+party-specific private input isolation      PASS
+party-specific K0/K1 isolation              PASS
+full-key RAM preload                        PASS
+READY/START control lifecycle               PASS
+peer launch without fixed startup delay     PASS
+public Protein execution                    PASS
+secure online adjacency normalization       PASS
+2PC affinity output consistency             PASS
+```
+
+It does **not** yet validate:
+
+```text
+physical cross-machine networking
+real inter-server RTT / bandwidth
+cloud firewall / security-group configuration
+physical two-server throughput
+```
+
+Those measurements must be reported only after an actual two-host run.
+
+A second regression test was performed with:
+
+```text
+logical N       = 17
+micro-batch B   = 8
+chunks          = 3
+padded N        = 24
+padding samples = 7
+```
+
+The per-party launcher completed successfully:
+
+```text
+PASS: distributed per-party runner N=17, B=8, chunks=3, returned=17
+OFFLINE/ONLINE SEPARATION: PASS
+Dealer process was never started.
+```
+
+The complete FSS key files were preloaded once per party:
+
+```text
+K0 bytes = 8,864,821,248
+K1 bytes = 8,864,821,248
+key bytes per chunk per party = 2,954,940,416
+```
+
+All three evaluator chunks completed on both parties, including the second and
+third full-key offsets.
+
+The 17 logical predictions produced by the per-party launcher were compared
+against `run_offline_online_local.py` using the same prepared inputs and
+offline keys. All 17 predictions matched exactly.
+----
+
 ## 8.6 Validated local two-party smoke test
 
 The complete README execution path has been validated using:
