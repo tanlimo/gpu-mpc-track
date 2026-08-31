@@ -327,8 +327,24 @@ int main(int argc, char *argv[])
         InfType *d_maskTiled_work  = (InfType *)gpuMalloc(maskTiled.size()  * sizeof(InfType));
         InfType *d_proteinEmb_work = (InfType *)gpuMalloc(proteinEmb.size() * sizeof(InfType));
 
+        // Production inference should execute the MPC graph exactly once.
+        // Historical benchmarking used 11 forwards (1 warmup + 10 measured).
+        // Keep that mode available explicitly via DDG_INFERENCE_ITERS=11.
+        int inferenceIters = 1;
+        if (const char *env = std::getenv("DDG_INFERENCE_ITERS")) {
+            inferenceIters = std::atoi(env);
+            if (inferenceIters <= 0) {
+                fprintf(stderr,
+                        "[DeepDTAGen] DDG_INFERENCE_ITERS must be >= 1\n");
+                exit(1);
+            }
+        }
+
+        printf("[DeepDTAGen] inference iterations = %d\n",
+               inferenceIters);
+
         Tensor<InfType> *out_ptr = nullptr;   // capture last forward output
-        for (int i = 0; i < 11; i++)
+        for (int i = 0; i < inferenceIters; i++)
         {
             fss->keyBuf = fss->startPtr;
             fss->s.reset();
@@ -382,8 +398,14 @@ int main(int argc, char *argv[])
             fss->output(out);
             out_ptr = &out;   // model holds this tensor; stable across iters
             auto end = std::chrono::high_resolution_clock::now();
-            if (i > 0)
-                times.push_back(std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+            // Benchmark mode (>1 iteration): iteration 0 is warmup.
+            // Production mode (1 iteration): measure that single execution.
+            if (inferenceIters == 1 || i > 0)
+                times.push_back(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        end - start
+                    ).count()
+                );
             auto commEnd = fss->peer->bytesSent() + fss->peer->bytesReceived();
             if (i == 0)
                 commBytes = commEnd - commStart;
