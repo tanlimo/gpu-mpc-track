@@ -483,6 +483,307 @@ int main(int argc, char *argv[])
         model->setBackend(fss);
         model->optimize();
 
+        const char *evalChunkRootEnv =
+            std::getenv("DDG_EVAL_CHUNK_ROOT");
+
+        // Persistent fixed-shape evaluator.
+        //
+        // The model, CUDA context, peer connection and one-chunk key buffer
+        // remain alive across all chunks.  The sequential key file is read
+        // one fixed-size chunk at a time.
+        if (evalChunkRootEnv && evalChunkRootEnv[0]) {
+            const char *evalChunksEnv =
+                std::getenv("DDG_EVAL_CHUNKS");
+
+            int nChunks =
+                evalChunksEnv ? std::atoi(evalChunksEnv) : 0;
+
+            if (nChunks <= 0) {
+                fprintf(
+                    stderr,
+                    "[DeepDTAGen] DDG_EVAL_CHUNKS must be >= 1 "
+                    "when DDG_EVAL_CHUNK_ROOT is set\n"
+                );
+                exit(1);
+            }
+
+            if (std::getenv("DDG_INFERENCE_ITERS")) {
+                fprintf(
+                    stderr,
+                    "[DeepDTAGen] DDG_INFERENCE_ITERS is not "
+                    "supported in persistent evaluator mode\n"
+                );
+                exit(1);
+            }
+
+            std::string evalChunkRoot(evalChunkRootEnv);
+
+            printf(
+                "[DeepDTAGen] persistent evaluator: "
+                "chunks=%d BATCH=%d key_chunk=%zu\n",
+                nChunks,
+                BATCH,
+                fss->keySize
+            );
+
+            // One reusable set of device input buffers.
+            InfType *d_X_work =
+                (InfType *)gpuMalloc(
+                    X.size() * sizeof(InfType)
+                );
+            InfType *d_A_hat_work =
+                (InfType *)gpuMalloc(
+                    A_hat.size() * sizeof(InfType)
+                );
+            InfType *d_maskTiled_work =
+                (InfType *)gpuMalloc(
+                    maskTiled.size() * sizeof(InfType)
+                );
+            InfType *d_proteinEmb_work =
+                (InfType *)gpuMalloc(
+                    proteinEmb.size() * sizeof(InfType)
+                );
+
+            std::vector<u64> chunkTimes;
+            u64 totalCommBytes = 0;
+
+            // Sequential reads start at key chunk 0.
+            if (lseek(fss->fd, 0, SEEK_SET) < 0) {
+                perror("lseek");
+                exit(1);
+            }
+
+            for (int chunk = 0; chunk < nChunks; ++chunk) {
+                char chunkName[64];
+                snprintf(
+                    chunkName,
+                    sizeof(chunkName),
+                    "chunk_%05d",
+                    chunk
+                );
+
+                std::string chunkDir =
+                    evalChunkRoot + "/" +
+                    std::string(chunkName);
+
+                printf(
+                    "[DeepDTAGen] evaluator chunk %d/%d: %s\n",
+                    chunk + 1,
+                    nChunks,
+                    chunkDir.c_str()
+                );
+
+                // Refresh this party's input shares.
+                loadShare(
+                    chunkDir + "/x_share" +
+                    std::to_string(party) + ".dat",
+                    X
+                );
+                loadShare(
+                    chunkDir + "/adj_share" +
+                    std::to_string(party) + ".dat",
+                    A_hat
+                );
+                loadShare(
+                    chunkDir + "/mask_share" +
+                    std::to_string(party) + ".dat",
+                    maskTiled
+                );
+
+                // proteinEmb is public: P0 holds zero, P1 holds P.
+                if (party == 1) {
+                    loadShare(
+                        chunkDir + "/protein_emb.dat",
+                        proteinEmb
+                    );
+                }
+                else {
+                    proteinEmb.zero();
+                }
+
+                // Read exactly the next key chunk from the already-open
+                // sequential key file.  readKey advances the fd offset.
+                readKey(
+                    fss->fd,
+                    fss->keySize,
+                    fss->startPtr,
+                    NULL
+                );
+
+                // Refresh the reusable GPU input buffers with this chunk.
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_X_work,
+                        X.data,
+                        X.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_A_hat_work,
+                        A_hat.data,
+                        A_hat.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_maskTiled_work,
+                        maskTiled.data,
+                        maskTiled.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_proteinEmb_work,
+                        proteinEmb.data,
+                        proteinEmb.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+
+                X.d_data = d_X_work;
+                A_hat.d_data = d_A_hat_work;
+                maskTiled.d_data = d_maskTiled_work;
+                proteinEmb.d_data = d_proteinEmb_work;
+
+                // Reset per-forward backend state, but keep the peer,
+                // model and key allocation alive.
+                fss->keyBuf = fss->startPtr;
+                fss->s.reset();
+                fss->sxsMatmulIdx = 0;
+                fss->resetLeaves();
+
+                if (BATCH == 1) {
+                    fss->registerLeaf(X.d_data);
+                    fss->registerLeaf(A_hat.d_data);
+                    fss->registerLeaf(maskTiled.d_data);
+                    fss->registerLeaf(proteinEmb.d_data);
+                }
+                else {
+                    for (int b = 0; b < BATCH; ++b) {
+                        fss->registerLeaf(
+                            X.d_data +
+                            b * Nmax * FEAT
+                        );
+                    }
+
+                    for (int b = 0; b < BATCH; ++b) {
+                        fss->registerLeaf(
+                            A_hat.d_data +
+                            b * Nmax * Nmax
+                        );
+                    }
+
+                    fss->registerLeaf(
+                        maskTiled.d_data
+                    );
+                    fss->registerLeaf(
+                        proteinEmb.d_data
+                    );
+                }
+
+                // Both parties may finish key I/O at different times.
+                // Synchronize immediately before online computation.
+                fss->peer->sync();
+
+                auto commStart =
+                    fss->peer->bytesSent() +
+                    fss->peer->bytesReceived();
+
+                auto start =
+                    std::chrono::high_resolution_clock::now();
+
+                auto &out = model->forward(X);
+                fss->output(out);
+
+                auto end =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 elapsed =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(end - start).count();
+
+                chunkTimes.push_back(elapsed);
+
+                auto commEnd =
+                    fss->peer->bytesSent() +
+                    fss->peer->bytesReceived();
+
+                u64 chunkComm =
+                    commEnd - commStart;
+
+                totalCommBytes += chunkComm;
+
+                printf(
+                    "[DeepDTAGen] evaluator chunk %d "
+                    "compute_us=%lu comm=%lu\n",
+                    chunk,
+                    elapsed,
+                    chunkComm
+                );
+
+                // fss->output() reconstructs the final host output
+                // onto party 0.  Capture it before the next forward.
+                if (party == 0) {
+                    int nOut = (int)out.size();
+
+                    for (int j = 0; j < nOut; ++j) {
+                        int32_t sv =
+                            (int32_t)(uint32_t)
+                            (uint64_t)out.data[j];
+
+                        double aff =
+                            (double)sv /
+                            (double)(1LL << scale);
+
+                        int globalIdx =
+                            chunk * BATCH + j;
+
+                        printf(
+                            "AFFINITY_GLOBAL[%d]=%.6f\n",
+                            globalIdx,
+                            aff
+                        );
+                    }
+                }
+            }
+
+            gpuFree(d_X_work);
+            gpuFree(d_A_hat_work);
+            gpuFree(d_maskTiled_work);
+            gpuFree(d_proteinEmb_work);
+
+            fss->close();
+
+            u64 totalCompute = std::reduce(
+                chunkTimes.begin(),
+                chunkTimes.end(),
+                (u64)0
+            );
+
+            double avgCompute =
+                chunkTimes.empty()
+                    ? 0.0
+                    : (double)totalCompute /
+                      (double)chunkTimes.size();
+
+            printf(
+                "[DeepDTAGen] persistent evaluator complete: "
+                "chunks=%d total_compute_us=%lu "
+                "avg_compute_us=%.3f total_comm=%lu\n",
+                nChunks,
+                totalCompute,
+                avgCompute,
+                totalCommBytes
+            );
+
+            return 0;
+        }
+
         std::vector<u64> times;
         u64 commBytes = 0;
         lseek(fss->fd, 0, SEEK_SET);
