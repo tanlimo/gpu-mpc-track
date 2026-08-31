@@ -41,6 +41,18 @@ public:
     u8 *startPtr = NULL;
     u8 *keyBuf = NULL;
     size_t keySize = 0;
+
+    // Evaluator FSS host-key allocation.
+    //
+    // Normal persistent mode:
+    //     keyAllocSize == keySize == one chunk
+    //
+    // DDG_EVAL_FULL_KEY_RAM:
+    //     keyAllocSize == complete party key file
+    //     keySize      == one fixed-B chunk
+    size_t keyAllocSize = 0;
+    bool fullKeyRamMode = false;
+
     int fd = -1;
     GpuPeer *peer = NULL;
     int party = -1;
@@ -105,6 +117,19 @@ public:
 
             const bool externalKeyIO =
                 std::getenv("DDG_EVAL_EXTERNAL_KEY_IO") != nullptr;
+
+            fullKeyRamMode =
+                std::getenv("DDG_EVAL_FULL_KEY_RAM") != nullptr;
+
+            if (fullKeyRamMode && externalKeyIO) {
+                fprintf(
+                    stderr,
+                    "[DDGOrcaEval] DDG_EVAL_FULL_KEY_RAM "
+                    "is incompatible with "
+                    "DDG_EVAL_EXTERNAL_KEY_IO\n"
+                );
+                exit(1);
+            }
 
             if (explicitBytesEnv && explicitBytesEnv[0]) {
                 char *endPtr = nullptr;
@@ -178,6 +203,11 @@ public:
                     }
 
                     fd = openForReading(filename);
+
+                    keyAllocSize =
+                        fullKeyRamMode
+                            ? totalKeySize
+                            : keySize;
                 }
                 else {
                     // D2 pipeline mode:
@@ -185,6 +215,7 @@ public:
                     // Persistent evaluator code will fill startPtr
                     // from a bounded key slot for each chunk.
                     fd = -1;
+                    keyAllocSize = keySize;
                 }
             }
             else {
@@ -265,17 +296,93 @@ public:
                 }
 
                 fd = openForReading(filename);
+
+                keyAllocSize =
+                    fullKeyRamMode
+                        ? totalKeySize
+                        : keySize;
             }
 
-            // Always allocate exactly one key chunk.
+            if (keyAllocSize == 0) {
+                keyAllocSize = keySize;
+            }
+
+            // ----------------------------------------------------
+            // Final evaluator FSS key buffer.
+            //
+            // Normal persistent:
+            //   one-chunk allocation.
+            //
+            // FULL_KEY_RAM:
+            //   allocate the COMPLETE key stream and read the key
+            //   file directly into this final buffer.
+            //
+            // There is no second full-size RAM image and therefore
+            // no later full-chunk RAM->RAM memcpy.
+            // ----------------------------------------------------
             getAlignedBuf(
                 &keyBuf,
-                keySize,
+                keyAllocSize,
                 false
             );
 
             startPtr = keyBuf;
+
+            if (fullKeyRamMode) {
+                if (fd == -1) {
+                    fprintf(
+                        stderr,
+                        "[DDGOrcaEval] full-key RAM mode "
+                        "requires an open sequential key file\n"
+                    );
+                    exit(1);
+                }
+
+                if (lseek(fd, 0, SEEK_SET) < 0) {
+                    perror("lseek full-key RAM");
+                    exit(1);
+                }
+
+                auto preloadStart =
+                    std::chrono::high_resolution_clock::now();
+
+                readKey(
+                    fd,
+                    keyAllocSize,
+                    startPtr,
+                    NULL
+                );
+
+                auto preloadEnd =
+                    std::chrono::high_resolution_clock::now();
+
+                u64 preloadUs =
+                    std::chrono::duration_cast<
+                        std::chrono::microseconds
+                    >(
+                        preloadEnd -
+                        preloadStart
+                    ).count();
+
+                // The disk file is no longer needed after the
+                // complete key has entered the FINAL FSS buffer.
+                closeFile(fd);
+                fd = -1;
+
+                printf(
+                    "[DDG_PRELOAD][KEY] "
+                    "party=%d bytes=%zu "
+                    "chunk_bytes=%zu "
+                    "runtime_us=%lu "
+                    "mode=direct_full_buffer\n",
+                    party,
+                    keyAllocSize,
+                    keySize,
+                    preloadUs
+                );
+            }
         }
+
         peer = new GpuPeer(compress);
         peer->connect(party, ip);
     }

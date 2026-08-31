@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -290,6 +291,15 @@ def main() -> int:
     )
 
     ap.add_argument(
+        "--full-key-ram",
+        action="store_true",
+        help=(
+            "preload the complete party FSS key file directly "
+            "into the final evaluator key buffer"
+        ),
+    )
+
+    ap.add_argument(
         "--keep-work",
         action="store_true",
     )
@@ -489,8 +499,12 @@ def main() -> int:
             "Dealer          = NOT STARTED"
         )
         print(
-            "key mode        = offline full file; "
-            "sequential online reads"
+            "key mode        = " +
+            (
+                "offline full file -> direct full RAM buffer"
+                if args.full_key_ram
+                else "offline full file; sequential online reads"
+            )
         )
         print(
             "Protein         = timed FP32 GPU"
@@ -695,6 +709,16 @@ def main() -> int:
                 "DDG_EVAL_CHUNKS"
             ] = str(chunks)
 
+            if args.full_key_ram:
+                env[
+                    "DDG_EVAL_FULL_KEY_RAM"
+                ] = "1"
+            else:
+                env.pop(
+                    "DDG_EVAL_FULL_KEY_RAM",
+                    None,
+                )
+
             # Explicitly guarantee full-file sequential mode.
             for name in (
                 "DDG_EVAL_EXTERNAL_KEY_IO",
@@ -786,6 +810,63 @@ def main() -> int:
             )
 
         # --------------------------------------------------------
+        # Parse direct full-RAM preload metadata.
+        #
+        # Current runner starts evaluators AFTER online_start_ns,
+        # so preload is still included in ONLINE_TOTAL.
+        # A later READY/START launcher may move this phase outside
+        # the online wall, but reporting remains explicit either way.
+        # --------------------------------------------------------
+        preload_info = {}
+
+        preload_re = re.compile(
+            r"\[DDG_PRELOAD\]\[KEY\]\s+"
+            r"party=(\d+)\s+"
+            r"bytes=(\d+)\s+"
+            r"chunk_bytes=(\d+)\s+"
+            r"runtime_us=(\d+)\s+"
+            r"mode=([^\s]+)"
+        )
+
+        if args.full_key_ram:
+            for party in (0, 1):
+                eval_log = (
+                    logs /
+                    f"eval_p{party}.log"
+                )
+
+                eval_text = eval_log.read_text(
+                    errors="ignore"
+                )
+
+                matches = preload_re.findall(
+                    eval_text
+                )
+
+                if len(matches) != 1:
+                    raise RuntimeError(
+                        f"expected exactly one preload record "
+                        f"for P{party}, got {len(matches)}"
+                    )
+
+                p_txt, bytes_txt, chunk_txt, us_txt, mode = (
+                    matches[0]
+                )
+
+                if int(p_txt) != party:
+                    raise RuntimeError(
+                        f"preload party mismatch: "
+                        f"expected={party}, actual={p_txt}"
+                    )
+
+                preload_info[party] = {
+                    "bytes": int(bytes_txt),
+                    "chunk_bytes": int(chunk_txt),
+                    "runtime_us": int(us_txt),
+                    "mode": mode,
+                }
+
+        # --------------------------------------------------------
         # Parse evaluator profiles.
         # --------------------------------------------------------
         eval_fields = (
@@ -871,9 +952,14 @@ def main() -> int:
 
         print(
             "[DDG_TIME][SCHEMA] "
-            "version=2 "
+            "version=3 "
             "status=PRE_COMPLIANCE "
-            "key_mode=offline_full_file"
+            "key_mode=" +
+            (
+                "offline_ram_direct"
+                if args.full_key_ram
+                else "offline_full_file"
+            )
         )
 
         print(
@@ -898,6 +984,20 @@ def main() -> int:
             "runtime_us=NA "
             "included_in_online_wall=0"
         )
+
+        if args.full_key_ram:
+            for party in (0, 1):
+                pi = preload_info[party]
+
+                print(
+                    "[DDG_TIME][KEY_PRELOAD] "
+                    f"party={party} "
+                    f"bytes={pi['bytes']} "
+                    f"chunk_bytes={pi['chunk_bytes']} "
+                    f"runtime_us={pi['runtime_us']} "
+                    f"mode={pi['mode']} "
+                    "included_in_online_wall=1"
+                )
 
         print(
             "[DDG_TIME][PROTEIN] "
@@ -930,7 +1030,12 @@ def main() -> int:
             "status=PRE_COMPLIANCE "
             "dealer=offline_reported_separately "
             "key_distribution=offline_reported_separately "
-            "key_preload=NOT_YET_IMPLEMENTED "
+            "key_preload=" +
+            (
+                "direct_full_ram_in_online_wall "
+                if args.full_key_ram
+                else "sequential_file_reads_in_online_wall "
+            ) +
             "public_protein_model=timed_fp32_gpu "
             "secret_adj_norm=" +
             (

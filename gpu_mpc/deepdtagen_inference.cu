@@ -1072,9 +1072,64 @@ int main(int argc, char *argv[])
             std::vector<u64> chunkTimes;
             u64 totalCommBytes = 0;
 
-            // Sequential-file mode starts at chunk 0.
-            // External-slot mode has no persistent key fd.
-            if (!externalKeyIO) {
+            // --------------------------------------------------------
+            // Key source for persistent evaluation.
+            //
+            // FULL_KEY_RAM:
+            //   The constructor has already loaded the COMPLETE party
+            //   key file directly into the final FSS host buffer and
+            //   closed the key fd.
+            //
+            // Sequential-file regression mode:
+            //   Keep the existing one-chunk buffer + per-chunk disk read.
+            //
+            // External-slot mode:
+            //   Keep the existing bounded streaming path.
+            // --------------------------------------------------------
+            const bool fullKeyRamMode =
+                fss->fullKeyRamMode;
+
+            if (fullKeyRamMode) {
+                const size_t expectedFullBytes =
+                    fss->keySize *
+                    static_cast<size_t>(nChunks);
+
+                if (fss->keyAllocSize != expectedFullBytes) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] full-key RAM size mismatch: "
+                        "party=%d alloc=%zu expected=%zu "
+                        "chunks=%d chunk_bytes=%zu\n",
+                        party,
+                        fss->keyAllocSize,
+                        expectedFullBytes,
+                        nChunks,
+                        fss->keySize
+                    );
+                    exit(1);
+                }
+
+                if (fss->fd != -1) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] full-key RAM mode expected "
+                        "closed key fd, got fd=%d\n",
+                        fss->fd
+                    );
+                    exit(1);
+                }
+
+                printf(
+                    "[DeepDTAGen] evaluator full-key RAM mode: "
+                    "party=%d total=%zu chunks=%d "
+                    "chunk=%zu\n",
+                    party,
+                    fss->keyAllocSize,
+                    nChunks,
+                    fss->keySize
+                );
+            }
+            else if (!externalKeyIO) {
                 if (lseek(fss->fd, 0, SEEK_SET) < 0) {
                     perror("lseek");
                     exit(1);
@@ -1146,8 +1201,49 @@ int main(int argc, char *argv[])
                 u64 profEvalKeyWaitUs = 0;
                 u64 profEvalKeyReadUs = 0;
 
-                if (!externalKeyIO) {
-                    // Existing sequential-file path.
+                // Beginning of this chunk's FSS key stream.
+                //
+                // Default/sequential/external modes continue using
+                // startPtr as the reusable one-chunk buffer.
+                //
+                // FULL_KEY_RAM instead points directly into the
+                // appropriate region of the complete resident key
+                // stream.  No disk I/O and no RAM->RAM copy occurs.
+                u8 *chunkKeyStart =
+                    fss->startPtr;
+
+                if (fullKeyRamMode) {
+                    const size_t keyOffset =
+                        static_cast<size_t>(chunk) *
+                        fss->keySize;
+
+                    if (
+                        keyOffset > fss->keyAllocSize ||
+                        fss->keySize >
+                            fss->keyAllocSize - keyOffset
+                    ) {
+                        fprintf(
+                            stderr,
+                            "[DeepDTAGen] full-key RAM chunk "
+                            "out of bounds: "
+                            "party=%d chunk=%d "
+                            "offset=%zu chunk_bytes=%zu "
+                            "alloc=%zu\n",
+                            party,
+                            chunk,
+                            keyOffset,
+                            fss->keySize,
+                            fss->keyAllocSize
+                        );
+                        exit(1);
+                    }
+
+                    chunkKeyStart =
+                        fss->startPtr +
+                        keyOffset;
+                }
+                else if (!externalKeyIO) {
+                    // Existing sequential-file regression path.
                     auto profKeyReadStart =
                         std::chrono::high_resolution_clock::now();
 
@@ -1346,7 +1442,15 @@ int main(int argc, char *argv[])
 
                 // Reset per-forward backend state, but keep the peer,
                 // model and key allocation alive.
-                fss->keyBuf = fss->startPtr;
+                //
+                // FULL_KEY_RAM:
+                //   keyBuf begins directly at this chunk's region
+                //   inside the complete resident key stream.
+                //
+                // Other modes:
+                //   chunkKeyStart == startPtr, preserving the
+                //   previous behavior.
+                fss->keyBuf = chunkKeyStart;
                 fss->s.reset();
                 fss->sxsMatmulIdx = 0;
                 fss->resetLeaves();
