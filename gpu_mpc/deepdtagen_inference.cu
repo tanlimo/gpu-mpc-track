@@ -265,19 +265,199 @@ int main(int argc, char *argv[])
         // Keygen uses r_protein = 0 for both parties (proteinEmb.d_data stays 0),
         // making the fused mask [r_d2 | 0]. Eval reconstructs the additive share
         // (0, P) to get P on both parties before concat.
-        loadShare(shareDir + "/x_share0.dat", X);
-        loadShare(shareDir + "/adj_share0.dat", A_hat);
-        loadShare(shareDir + "/mask_share0.dat", maskTiled);
-        // proteinEmb NOT loaded in keygen → d_data stays 0 → r_protein = 0
+        const char *chunkRootEnv = std::getenv("DDG_DEALER_CHUNK_ROOT");
+        const char *chunkCountEnv = std::getenv("DDG_DEALER_CHUNKS");
 
-        X.d_data         = (InfType *)moveToGPU((u8 *)X.data, X.size() * sizeof(InfType), nullptr);
-        A_hat.d_data     = (InfType *)moveToGPU((u8 *)A_hat.data, A_hat.size() * sizeof(InfType), nullptr);
-        maskTiled.d_data = (InfType *)moveToGPU((u8 *)maskTiled.data, maskTiled.size() * sizeof(InfType), nullptr);
-        proteinEmb.d_data = (InfType *)moveToGPU((u8 *)proteinEmb.data, proteinEmb.size() * sizeof(InfType), nullptr);
+        // Existing one-chunk behaviour remains the default.
+        if (!(chunkRootEnv && chunkRootEnv[0])) {
+            loadShare(shareDir + "/x_share0.dat", X);
+            loadShare(shareDir + "/adj_share0.dat", A_hat);
+            loadShare(shareDir + "/mask_share0.dat", maskTiled);
+            // proteinEmb NOT loaded in keygen → d_data stays 0 → r_protein = 0
 
-        auto &out = model->forward(X);
-        fss->output(out);
-        fss->close();
+            X.d_data =
+                (InfType *)moveToGPU(
+                    (u8 *)X.data,
+                    X.size() * sizeof(InfType),
+                    nullptr
+                );
+            A_hat.d_data =
+                (InfType *)moveToGPU(
+                    (u8 *)A_hat.data,
+                    A_hat.size() * sizeof(InfType),
+                    nullptr
+                );
+            maskTiled.d_data =
+                (InfType *)moveToGPU(
+                    (u8 *)maskTiled.data,
+                    maskTiled.size() * sizeof(InfType),
+                    nullptr
+                );
+            proteinEmb.d_data =
+                (InfType *)moveToGPU(
+                    (u8 *)proteinEmb.data,
+                    proteinEmb.size() * sizeof(InfType),
+                    nullptr
+                );
+
+            auto &out = model->forward(X);
+            fss->output(out);
+            fss->close();
+        }
+        else {
+            // Persistent fixed-shape dealer prototype.
+            //
+            // The model graph and backend are initialized once.  Each chunk
+            // refreshes the host inputs and copies them into reusable GPU input
+            // buffers.  flushChunk() resets only the key-buffer cursor; RNG and
+            // the pinned key allocation remain alive across chunks.
+            int nChunks = chunkCountEnv ? std::atoi(chunkCountEnv) : 0;
+            if (nChunks <= 0) {
+                fprintf(
+                    stderr,
+                    "[DeepDTAGen] DDG_DEALER_CHUNKS must be >= 1 "
+                    "when DDG_DEALER_CHUNK_ROOT is set\n"
+                );
+                exit(1);
+            }
+
+            std::string chunkRoot(chunkRootEnv);
+
+            printf(
+                "[DeepDTAGen] persistent dealer: chunks=%d BATCH=%d\n",
+                nChunks,
+                BATCH
+            );
+
+            // Reusable device buffers for the secret input leaves.
+            InfType *d_X_input =
+                (InfType *)gpuMalloc(X.size() * sizeof(InfType));
+            InfType *d_A_hat_input =
+                (InfType *)gpuMalloc(A_hat.size() * sizeof(InfType));
+            InfType *d_mask_input =
+                (InfType *)gpuMalloc(maskTiled.size() * sizeof(InfType));
+            InfType *d_protein_input =
+                (InfType *)gpuMalloc(proteinEmb.size() * sizeof(InfType));
+
+            // Dealer protein mask remains zero for every chunk.
+            proteinEmb.zero();
+
+            std::string outFile =
+                keyFileName +
+                "_inference_key" +
+                std::to_string(party) +
+                ".dat";
+
+            int outFd = openForWriting(outFile);
+
+            size_t expectedChunkKeySize = 0;
+
+            for (int chunk = 0; chunk < nChunks; ++chunk) {
+                char chunkName[64];
+                snprintf(
+                    chunkName,
+                    sizeof(chunkName),
+                    "chunk_%05d",
+                    chunk
+                );
+
+                std::string chunkDir =
+                    chunkRoot + "/" + std::string(chunkName);
+
+                printf(
+                    "[DeepDTAGen] dealer chunk %d/%d: %s\n",
+                    chunk + 1,
+                    nChunks,
+                    chunkDir.c_str()
+                );
+
+                loadShare(chunkDir + "/x_share0.dat", X);
+                loadShare(chunkDir + "/adj_share0.dat", A_hat);
+                loadShare(chunkDir + "/mask_share0.dat", maskTiled);
+
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_X_input,
+                        X.data,
+                        X.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_A_hat_input,
+                        A_hat.data,
+                        A_hat.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemcpy(
+                        d_mask_input,
+                        maskTiled.data,
+                        maskTiled.size() * sizeof(InfType),
+                        cudaMemcpyHostToDevice
+                    )
+                );
+                checkCudaErrors(
+                    cudaMemset(
+                        d_protein_input,
+                        0,
+                        proteinEmb.size() * sizeof(InfType)
+                    )
+                );
+
+                // Rebind the live input tensors because forward/keygen may
+                // mutate internal device pointers/state.
+                X.d_data = d_X_input;
+                A_hat.d_data = d_A_hat_input;
+                maskTiled.d_data = d_mask_input;
+                proteinEmb.d_data = d_protein_input;
+
+                auto &out = model->forward(X);
+                fss->output(out);
+
+                size_t chunkKeySize = fss->flushChunk(outFd);
+
+                printf(
+                    "[DeepDTAGen] dealer chunk %d key bytes = %zu\n",
+                    chunk,
+                    chunkKeySize
+                );
+
+                if (chunk == 0) {
+                    expectedChunkKeySize = chunkKeySize;
+                }
+                else if (chunkKeySize != expectedChunkKeySize) {
+                    fprintf(
+                        stderr,
+                        "[DeepDTAGen] ERROR: key size changed: "
+                        "expected=%zu actual=%zu chunk=%d\n",
+                        expectedChunkKeySize,
+                        chunkKeySize,
+                        chunk
+                    );
+                    exit(1);
+                }
+            }
+
+            assert(0 == fsync(outFd) && "sync error!");
+            closeFile(outFd);
+
+            gpuFree(d_X_input);
+            gpuFree(d_A_hat_input);
+            gpuFree(d_mask_input);
+            gpuFree(d_protein_input);
+
+            fss->finalize();
+
+            printf(
+                "[DeepDTAGen] persistent dealer complete: "
+                "%d chunks, %zu bytes/chunk\n",
+                nChunks,
+                expectedChunkKeySize
+            );
+        }
     }
     else
     {
