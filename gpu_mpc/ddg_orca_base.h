@@ -96,10 +96,76 @@ public:
         initGPUMemPool();
         if (keyFile.compare("") != 0)
         {
-            auto filename = keyFile + "_inference_key" + std::to_string(party) + ".dat";
-            keySize = std::filesystem::file_size(filename);
+            auto filename =
+                keyFile + "_inference_key" +
+                std::to_string(party) + ".dat";
+
+            size_t totalKeySize =
+                static_cast<size_t>(
+                    std::filesystem::file_size(filename)
+                );
+
+            // Default one-shot evaluator: the whole file is one key chunk.
+            keySize = totalKeySize;
+
+            // Persistent evaluator prototype: the file contains nChunks
+            // fixed-size key chunks back-to-back, while RAM holds only one.
+            if (const char *chunksEnv =
+                    std::getenv("DDG_EVAL_CHUNKS")) {
+
+                long nChunks = std::strtol(
+                    chunksEnv,
+                    nullptr,
+                    10
+                );
+
+                if (nChunks <= 0) {
+                    fprintf(
+                        stderr,
+                        "[DDGOrcaEval] DDG_EVAL_CHUNKS "
+                        "must be >= 1\n"
+                    );
+                    exit(1);
+                }
+
+                if (totalKeySize % (size_t)nChunks != 0) {
+                    fprintf(
+                        stderr,
+                        "[DDGOrcaEval] key file size %zu "
+                        "is not divisible by chunks=%ld\n",
+                        totalKeySize,
+                        nChunks
+                    );
+                    exit(1);
+                }
+
+                keySize =
+                    totalKeySize / (size_t)nChunks;
+
+                // readKey/OpenForReading use direct/aligned I/O paths.
+                if (keySize % 4096 != 0) {
+                    fprintf(
+                        stderr,
+                        "[DDGOrcaEval] chunk key size %zu "
+                        "is not 4096-byte aligned\n",
+                        keySize
+                    );
+                    exit(1);
+                }
+
+                printf(
+                    "[DDGOrcaEval] sequential key: "
+                    "total=%zu chunks=%ld chunk=%zu\n",
+                    totalKeySize,
+                    nChunks,
+                    keySize
+                );
+            }
+
             fd = openForReading(filename);
-            // FIX: disable pinning for eval — 2 concurrent parties on 8GB GPU OOM
+
+            // Evaluator working set is one key chunk, not the
+            // entire sequential key file.
             getAlignedBuf(&keyBuf, keySize, false);
             startPtr = keyBuf;
         }
