@@ -53,6 +53,22 @@ from run_persistent_local import (
 )
 
 
+def wait_for_path(
+    path: Path,
+    timeout: float = 600.0,
+):
+    deadline = time.monotonic() + timeout
+
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"timeout waiting for {path}"
+            )
+
+        time.sleep(0.01)
+
+
+
 def load_offline_metadata(
     key_dir: Path,
 ) -> dict:
@@ -274,6 +290,12 @@ def main() -> int:
     ap.add_argument(
         "--gpu1",
         default="1",
+    )
+
+    ap.add_argument(
+        "--timeout",
+        type=float,
+        default=600.0,
     )
 
     ap.add_argument(
@@ -906,18 +928,52 @@ def main() -> int:
             time.perf_counter_ns()
         )
 
+
         # --------------------------------------------------------
         # Timed public Protein GatedCNN.
         #
-        # We conservatively keep Python worker startup/checkpoint
-        # loading in the online wall for now.  A persistent Protein
-        # worker can be optimized separately later.
+        # Persistent worker v1:
+        # Python startup, CUDA initialization and checkpoint loading
+        # are moved before ONLINE timing.
+        # ONLINE only sends command and waits completion.
         # --------------------------------------------------------
+
+        print(
+            "[driver] SETUP: starting Protein persistent worker",
+            flush=True,
+        )
+
+        protein_worker_dir = (
+            work_root /
+            "protein_worker"
+        )
+
+        protein_ready_file = (
+            protein_worker_dir /
+            "ready"
+        )
+
+        protein_done_file = (
+            protein_worker_dir /
+            "done"
+        )
+
+        protein_command_file = (
+            protein_worker_dir /
+            "command.json"
+        )
+
+        protein_worker_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
         protein_env = os.environ.copy()
 
         protein_env[
             "CUDA_VISIBLE_DEVICES"
         ] = str(args.gpu0)
+
 
         protein_cmd = [
             sys.executable,
@@ -934,11 +990,30 @@ def main() -> int:
             str(args.scale),
             "--bw",
             str(args.bw),
+            "--persistent-worker",
+            "--worker-dir",
+            str(protein_worker_dir),
         ]
 
-        protein_start_ns = (
-            time.perf_counter_ns()
+
+        protein_proc = subprocess.Popen(
+            protein_cmd,
+            env=protein_env,
+            text=True,
         )
+
+
+        wait_for_path(
+            protein_ready_file,
+            timeout=args.timeout,
+        )
+
+
+        print(
+            "[driver] SETUP: Protein worker READY",
+            flush=True,
+        )
+
 
         print(
             "[driver] ONLINE: start timed public "
@@ -946,46 +1021,45 @@ def main() -> int:
             flush=True,
         )
 
-        protein_proc = subprocess.run(
-            protein_cmd,
-            env=protein_env,
-            text=True,
+
+        protein_start_ns = time.perf_counter_ns()
+
+
+        protein_done_file.unlink(
+            missing_ok=True,
         )
 
-        if protein_proc.returncode != 0:
-            # Evaluators are still waiting at START.
-            # Do not leave them behind.
-            for party in (0, 1):
-                proc = eval_procs[party]
-
-                if proc.poll() is None:
-                    proc.terminate()
-
-            for party in (0, 1):
-                try:
-                    eval_procs[party].wait(
-                        timeout=5
-                    )
-                except subprocess.TimeoutExpired:
-                    eval_procs[party].kill()
-                    eval_procs[party].wait()
-
-            for party in (0, 1):
-                eval_files[party].close()
-
-            raise RuntimeError(
-                "timed Protein GatedCNN failed: "
-                f"rc={protein_proc.returncode}"
-            )
-
-        protein_end_ns = (
-            time.perf_counter_ns()
+        protein_command_file.unlink(
+            missing_ok=True,
         )
+
+
+        command = {
+            "chunk_root": str(work_root),
+            "chunks": chunks,
+            "batch": B,
+        }
+
+
+        protein_command_file.write_text(
+            json.dumps(command)
+        )
+
+
+        wait_for_path(
+            protein_done_file,
+            timeout=args.timeout,
+        )
+
+
+        protein_end_ns = time.perf_counter_ns()
+
 
         protein_runtime_us = (
             protein_end_ns -
             protein_start_ns
         ) // 1000
+
 
         print(
             "[driver] ONLINE: Protein complete: "
