@@ -1,27 +1,15 @@
 # GPU-Accelerated 2PC Inference for DeepDTAGen
 
-GPU-accelerated two-party secure inference for the **drug-target affinity prediction branch of DeepDTAGen**, developed for **iDASH Privacy & Security Workshop 2026 — Track 3: Accelerating MPC-Based Deep Learning for Drug-Target Interaction Prediction**.
+## Documentation
 
-The current implementation protects the **drug input** using two-party additive secret sharing, treats the **protein sequence and model parameters as public**, and outputs a continuous drug-target affinity prediction.
+- Environment setup:
+  `ENVIRONMENT_SETUP.md`
 
-Current production candidate:
+- Competition submission description:
+  `TRACK3_SUBMISSION.md`
 
-```text
-MPC parties          2
-Offline Dealer       semi-honest trusted setup
-Ring                 64 bit
-Fixed-point scale    12
-Drug                 private
-Protein              public
-Model parameters     public
-A_norm               securely computed online
-FSS keys             generated offline
-Evaluator key mode   direct full-RAM preload
-```
-
-> **Current compliance status: `PRE_COMPLIANCE`**
->
-> Preprocessing, Dealer generation, key preload, setup, online computation, and end-to-end timing are reported separately. The final competition treatment of model-specific FSS preprocessing should be confirmed with the organizers.
+- Validation and benchmark results:
+  `docs/VALIDATION_RESULTS.md`
 
 ---
 
@@ -81,9 +69,8 @@ key directories on a small container overlay or `/tmp` unless sufficient free
 space has first been verified with `df -h`.
 
 ```bash
-# ------------------------------------------------------------
-# 1. Prepare dataset
-# ------------------------------------------------------------
+
+## 0.1 Prepare dataset
 
 python3 reference/prepare_dataset.py \
   --csv data/davis_test.csv \
@@ -92,20 +79,14 @@ python3 reference/prepare_dataset.py \
   --scale 12 \
   --limit 3
 
-
-# ------------------------------------------------------------
-# 2. Prepare model
-# ------------------------------------------------------------
+## 0.2 Prepare model
 
 python3 reference/prepare_model.py \
   --checkpoint model/deepdtagen_model_kiba.pth \
   --output "$DDG_WORK/kiba_model" \
   --scale 12
 
-
-# ------------------------------------------------------------
-# 3. Generate complete offline FSS keys
-# ------------------------------------------------------------
+## 0.3 Generate complete offline FSS keys
 
 python3 gpu_mpc/run_offline_dealer.py \
   "$DDG_WORK/davis3_prepare" \
@@ -117,10 +98,7 @@ python3 gpu_mpc/run_offline_dealer.py \
   --scale 12 \
   --gpu 0
 
-
-# ------------------------------------------------------------
-# 4. Run local two-party online inference
-# ------------------------------------------------------------
+## 0.4 Run local two-party online inference
 
 python3 gpu_mpc/run_offline_online_local.py \
   "$DDG_WORK/davis3_prepare" \
@@ -417,7 +395,10 @@ SCALE = 12
 
 ## 2.6 Offline FSS keys and full-RAM Evaluator
 
-The current fallback generates the complete FSS key stream before online inference.
+The current implementation generates the complete FSS key stream during the offline phase before online inference.
+
+The online Evaluator uses the direct full-RAM key loading mode:
+
 
 ```text
 Offline Dealer:
@@ -443,1050 +424,784 @@ Online Evaluator setup:
 In `--full-key-ram` mode:
 
 - the complete key file is loaded directly into the final FSS host buffer;
-- no second full-size RAM copy is created;
-- no per-chunk SSD key read occurs during MPC execution;
-- micro-batches access different regions through pointer offsets.
+- no external key storage access occurs during online MPC execution;
+- all required FSS key material is loaded before online computation starts;
+- micro-batches access the preloaded RAM buffer through offsets.
 
 ---
 
 # 3. Repository Structure
 
-The main production-relevant files are:
+The repository is organized into source code, model preparation tools,
+ runtime scripts, and submission documentation.
 
-```text
+```
 gpu-mpc-track/
 │
 ├── README.md
+│     Main project overview and usage guide
+│
+├── ENVIRONMENT_SETUP.md
+│     Environment installation, Docker setup, and build instructions
+│
+├── TRACK3_SUBMISSION.md
+│     Competition submission description and execution instructions
+│
+├── METHOD_DESCRIPTION.md
+│     Detailed technical method description
+│
+├── docs/
+│   │
+│   ├── VALIDATION_RESULTS.md
+│   │     Benchmark results and validation records
+│   │
+│   └── archive/
+│         Historical development notes and intermediate documents
 │
 ├── gpu_mpc/
+│   │
 │   ├── deepdtagen_inference.cu
-│   │     Main Dealer / Evaluator CUDA program
+│   │     Main Dealer / Evaluator CUDA implementation
 │   │
 │   ├── deepdtagen.h
-│   │     DeepDTAGen affinity graph
+│   │     DeepDTAGen affinity inference graph
 │   │
 │   ├── gcn_layer.h
+│   │
 │   ├── masked_maxpool.h
+│   │
 │   ├── secure_adj_norm.h
-│   │     Secure drug graph operations
+│   │     Secure adjacency normalization
 │   │
 │   ├── ddg_orca.h
 │   ├── ddg_orca_base.h
 │   ├── ddg_orca_batched.h
-│   │     DeepDTAGen GPU-MPC backend
+│   │     GPU-MPC backend implementation
 │   │
 │   ├── run_offline_dealer.py
-│   │     Complete offline key generation
+│   │     Offline FSS key generation
 │   │
 │   ├── run_offline_online_local.py
-│   │     Local two-GPU online runner
+│   │     Local two-party GPU inference launcher
+│   │
+│   ├── run_offline_online_party.py
+│   │     Independent online party launcher for two-server deployment
 │   │
 │   └── Makefile
 │
 ├── reference/
+│   │
 │   ├── prepare_dataset.py
 │   │     External dataset → MPC input format
 │   │
 │   ├── prepare_model.py
-│   │     .pth → weights.bin
+│   │     DeepDTAGen checkpoint → MPC weights
 │   │
-│   ├── run_protein_chunks.py
-│   │     Public Protein Gated-CNN
+│   ├── affinity_model.py
 │   │
 │   ├── dense_graph.py
-│   └── ...
+│   │
+│   └── fixed_forward.py
 │
 ├── model/
-│   └── *.pth
+│   └── DeepDTAGen checkpoints
 │
 ├── data/
-│   └── datasets
+│   └── External datasets
 │
-└── ...
+└── scripts/
+    └── Development and validation scripts
 ```
 
-Large model files, datasets, generated shares, and FSS keys may be intentionally excluded from Git.
+Large generated files are intentionally excluded from Git:
 
----
+```
+datasets
 
-# 4. Environment Setup
+prepared secret shares
 
-This section is intended as a **fresh-environment recovery guide**.
+FSS key files
 
-Its purpose is to make it possible to enter a new Linux GPU environment or future competition container, configure all project dependencies, build the code, and finish with a successful minimal inference test.
+compiled CUDA binaries
 
----
-
-## 4.1 Validated development environment
-
-The current code has been successfully built and tested with:
-
-```text
-OS                  Ubuntu 22.04
-Python              3.12.3
-GCC / G++           11.4
-CUDA Toolkit        12.8
-
-PyTorch             2.8.0+cu128
-PyTorch CUDA        12.8
-NumPy               2.3.2
-pandas              3.0.5
-torch_geometric     2.8.0.post1
-RDKit               2026.03.5
-
-Development GPU     NVIDIA H800 PCIe 80 GB
+large model checkpoints
 ```
 
-Validated EzPC revision:
+These files should be generated inside the target execution environment.
 
-```text
-13592590466bbe19fa6f13384e3e896a0a4323b5
+------
+
+# 4. Dataset Preparation
+
+The submission supports replacing the evaluation dataset through the standard
+ CSV preparation pipeline.
+
+The complete workflow is:
+
+```
+External CSV dataset
+
+        │
+
+        ▼
+
+reference/prepare_dataset.py
+
+        │
+
+        ▼
+
+Prepared MPC input directory
+
+        │
+
+        ▼
+
+Offline FSS key generation
+
+        │
+
+        ▼
+
+Online GPU-MPC inference
 ```
 
-The same commit is used as the project `GPU-MPC` dependency.
+------
 
----
+## 4.1 External input format
 
-## 4.2 Check the base system
+The expected external dataset format is CSV.
 
-Run:
+Required columns:
 
-```bash
-nvidia-smi
-
-nvcc --version
-
-gcc --version
-g++ --version
-
-cmake --version
-
-python3 --version
-```
-
-Verify PyTorch CUDA access:
-
-```bash
-python3 - <<'PY'
-import torch
-
-print("torch =", torch.__version__)
-print("torch cuda =", torch.version.cuda)
-print("cuda available =", torch.cuda.is_available())
-
-if torch.cuda.is_available():
-    print("gpu =", torch.cuda.get_device_name(0))
-PY
-```
-
-Expected:
-
-```text
-cuda available = True
-```
-
----
-
-## 4.3 Basic system packages
-
-Install missing packages when necessary:
-
-```bash
-apt-get update
-
-apt-get install -y \
-  git \
-  cmake \
-  build-essential \
-  libssl-dev \
-  libgmp-dev \
-  libomp-dev
-```
-
-Skip packages already present in the target environment.
-
----
-
-## 4.4 Create a workspace
-
-Choose a writable workspace. The filesystem used for generated FSS keys must
-have sufficient free space.
-
-For example:
-
-```bash
-export WORKSPACE="$HOME/idash-track3"
-export DDG_WORK="$WORKSPACE/runtime"
-
-mkdir -p "$WORKSPACE"
-mkdir -p "$DDG_WORK"
-
-cd "$WORKSPACE"
-
-df -h "$WORKSPACE" "$DDG_WORK"
-```
-
-`DDG_WORK` is the default location used by the examples in Sections 5–8 for
-prepared datasets, serialized model weights, and generated FSS keys.
-
-If `$WORKSPACE` is located on a small container overlay, set `DDG_WORK` to a
-larger mounted writable filesystem instead.
-
----
-
-## 4.5 Obtain this repository
-
-```bash
-cd "$WORKSPACE"
-
-git clone https://github.com/tanlimo/gpu-mpc-track.git
-
-cd gpu-mpc-track
-```
-
-During development:
-
-```bash
-git checkout compliance-timing-v1
-```
-
-Verify:
-
-```bash
-git status
-git log -5 --oneline
-```
-
-For the final submitted package, use the submission branch/archive instead of relying on a development branch.
-
----
-
-## 4.6 Obtain EzPC/GPU-MPC
-
-Clone EzPC:
-
-```bash
-cd "$WORKSPACE"
-
-git clone https://github.com/mpc-msri/EzPC.git
-```
-
-Checkout the currently validated revision and initialize all required
-submodules:
-
-```bash
-cd "$WORKSPACE/EzPC"
-
-git checkout 13592590466bbe19fa6f13384e3e896a0a4323b5
-
-git submodule update --init --recursive
-```
-
-Verify the EzPC revision:
-
-```bash
-git rev-parse HEAD
-```
-
-Expected:
-
-```text
-13592590466bbe19fa6f13384e3e896a0a4323b5
-```
-
-Optionally inspect submodule state:
-
-```bash
-git submodule status --recursive
-```
-
-Set:
-
-```bash
-export GPU_MPC_ROOT="$WORKSPACE/EzPC/GPU-MPC"
-```
-
-Verify:
-
-```bash
-test -d "$GPU_MPC_ROOT" \
-  && echo "GPU_MPC_ROOT: PASS" \
-  || echo "GPU_MPC_ROOT: FAIL"
-```
-
----
-
-## 4.7 Configure CUDA
-
-The following environment variables must be configured in every new shell
-before building or running the MPC programs.
-
-Find the installed CUDA toolkit:
-
-```bash
-ls -d /usr/local/cuda*
-```
-
-The validated CUDA 12.8 configuration is:
-
-```bash
-export CUDA_HOME=/usr/local/cuda-12.8
-export CUDA_VERSION=12.8
-
-export PATH="$CUDA_HOME/bin:$PATH"
-export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
-
-export NVCC_PATH="$CUDA_HOME/bin/nvcc"
-
-export GPU_MPC_ROOT="$WORKSPACE/EzPC/GPU-MPC"
-```
-
-Verify:
-
-```bash
-echo "CUDA_HOME=$CUDA_HOME"
-echo "CUDA_VERSION=$CUDA_VERSION"
-echo "NVCC_PATH=$NVCC_PATH"
-echo "GPU_MPC_ROOT=$GPU_MPC_ROOT"
-
-which nvcc
-nvcc --version
-
-test -d "$GPU_MPC_ROOT" \
-  && echo "GPU_MPC_ROOT: PASS" \
-  || echo "GPU_MPC_ROOT: FAIL"
-```
-
-These exports are shell-local. If a new shell or container terminal is opened,
-configure them again before building or running the MPC programs.
----
-
-## 4.8 Python dependencies
-
-Inspect installed modules first:
-
-```bash
-python3 - <<'PY'
-mods = [
-    "torch",
-    "numpy",
-    "pandas",
-    "torch_geometric",
-    "rdkit",
-]
-
-for name in mods:
-    try:
-        mod = __import__(name)
-        print(
-            name,
-            getattr(mod, "__version__", "OK")
-        )
-    except Exception as exc:
-        print(name, "MISSING:", exc)
-PY
-```
-
-Install missing non-PyTorch dependencies when necessary:
-
-```bash
-python3 -m pip install \
-  numpy \
-  pandas \
-  torch-geometric \
-  rdkit
-```
-
-PyTorch should match the CUDA environment.
-
-If a CUDA-compatible PyTorch installation is already included in the base environment, prefer keeping the provided build instead of reinstalling it unnecessarily.
-
-Verify:
-
-```bash
-python3 - <<'PY'
-import sys
-import torch
-import numpy
-import pandas
-import torch_geometric
-import rdkit
-
-print("python =", sys.version.split()[0])
-print("torch =", torch.__version__)
-print("torch cuda =", torch.version.cuda)
-print("cuda available =", torch.cuda.is_available())
-print("numpy =", numpy.__version__)
-print("pandas =", pandas.__version__)
-print("torch_geometric =", torch_geometric.__version__)
-print("rdkit =", rdkit.__version__)
-PY
-```
-
-The validated development environment reports:
-
-```text
-python = 3.12.3
-torch = 2.8.0+cu128
-torch cuda = 12.8
-numpy = 2.3.2
-pandas = 3.0.5
-torch_geometric = 2.8.0.post1
-rdkit = 2026.03.5
-```
-
----
-
-## 4.9 Sytorch / SCI compatibility
-
-The current EzPC/GPU-MPC dependency includes Sytorch/SCI components.
-
-On the validated CUDA 12.8 + GCC 11 environment, the bundled SEAL source required an explicit `<mutex>` include.
-
-Define:
-
-```bash
-LOCKS="$GPU_MPC_ROOT/ext/sytorch/ext/sci/extern/SEAL/native/src/seal/util/locks.h"
-```
-
-Apply only when it is missing:
-
-```bash
-grep -q '^#include <mutex>$' "$LOCKS" || \
-  sed -i '/#include <shared_mutex>/a #include <mutex>' "$LOCKS"
-```
-
-Verify:
-
-```bash
-grep -n -A3 -B2 "shared_mutex" "$LOCKS" | head -10
-```
-
-The working source contains both:
-
-```cpp
-#include <shared_mutex>
-#include <mutex>
-```
-
-Also check:
-
-```bash
-grep SEAL_POLY_MOD_DEGREE_MAX \
-  "$GPU_MPC_ROOT/ext/sytorch/ext/sci/extern/SEAL/native/src/seal/util/defines.h"
-```
-
-The validated environment uses:
-
-```text
-SEAL_POLY_MOD_DEGREE_MAX 65536
-```
-
-Configure Sytorch:
-
-```bash
-cd "$GPU_MPC_ROOT/ext/sytorch"
-
-rm -rf build
-
-cmake -S . -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$PWD/build/install" \
-  -DCUDAToolkit_ROOT="$CUDA_HOME"
-```
-
-Build:
-
-```bash
-cmake --build build -j"$(nproc)"
-```
-
-If the target environment already contains a compatible built dependency, rebuilding may not be necessary.
-
----
-
-## 4.10 Build DeepDTAGen MPC
-
-Return to the repository:
-
-```bash
-cd "$WORKSPACE/gpu-mpc-track"
-```
-
-Build the current 64-bit configuration:
-
-```bash
-cd gpu_mpc
-
-make \
-  GPU_MPC_ROOT="$GPU_MPC_ROOT" \
-  BW=64 \
-  GPU_ARCH=90a \
-  deepdtagen_inference
-
-BUILD_RC=$?
-
-cd ..
-
-echo "BUILD_RC=$BUILD_RC"
-```
-
-Expected:
-
-```text
-BUILD_RC=0
-```
-
-`GPU_ARCH=90a` is used for the tested Hopper-class H800/H100 environment.
-
-Adjust it when using a different GPU architecture.
-
----
-
-## 4.11 Required external files
-
-The following large files may not be stored in Git.
-
-### Model checkpoint
-
-Place under:
-
-```text
-model/
-```
-
-For example:
-
-```text
-model/deepdtagen_model_kiba.pth
-```
-
-### Raw dataset
-
-Place under:
-
-```text
-data/
-```
-
-For example:
-
-```text
-data/new_test.csv
-```
-
-Absolute paths may also be supplied to the preparation scripts.
-
----
-
-## 4.12 Final environment smoke test
-
-A fresh environment is considered successfully configured only after the following full chain works:
-
-```text
-prepare dataset
-      ↓
-prepare model
-      ↓
-generate offline keys
-      ↓
-run local two-party online inference
-      ↓
-AFFINITY_GLOBAL
-      ↓
-PASS
-```
-
-Use Sections 5–8 for the exact commands.
-
----
-
-## 4.13 Common setup problems
-
-### `nvcc` not found
-
-```bash
-ls -d /usr/local/cuda*
-
-export CUDA_HOME=/usr/local/cuda-XX.Y
-export PATH="$CUDA_HOME/bin:$PATH"
-```
-
----
-
-### Wrong CUDA selected
-
-```bash
-which nvcc
-nvcc --version
-echo "$CUDA_HOME"
-```
-
----
-
-### PyTorch does not see CUDA
-
-```bash
-python3 - <<'PY'
-import torch
-print(torch.__version__)
-print(torch.version.cuda)
-print(torch.cuda.is_available())
-PY
-```
-
----
-
-### Invalid `GPU_MPC_ROOT`
-
-```bash
-echo "$GPU_MPC_ROOT"
-
-test -d "$GPU_MPC_ROOT" \
-  && echo PASS \
-  || echo FAIL
-```
-
----
-
-### SEAL `shared_mutex` / locking build error
-
-Check:
-
-```bash
-grep -n -A3 -B2 "shared_mutex" \
-  "$GPU_MPC_ROOT/ext/sytorch/ext/sci/extern/SEAL/native/src/seal/util/locks.h"
-```
-
-The validated source contains:
-
-```cpp
-#include <shared_mutex>
-#include <mutex>
-```
-
----
-
-### GPU architecture error
-
-Use a `GPU_ARCH` supported by both the installed CUDA toolkit and the target GPU.
-
-For the current H800/H100 configuration:
-
-```text
-GPU_ARCH=90a
-```
-
----
-
-# 5. Dataset Preparation
-
-## 5.1 External input format
-
-The preferred external dataset interface is CSV.
-
-By default, each row contains:
-
-| Column | Required | Meaning |
-|---|---|---|
-| `compound_iso_smiles` | yes | drug SMILES |
-| `target_sequence` | yes | protein amino-acid sequence |
-| `affinity` | optional | ground-truth affinity |
+| Column                | Required | Description                 |
+| --------------------- | -------- | --------------------------- |
+| `compound_iso_smiles` | Yes      | Drug SMILES representation  |
+| `target_sequence`     | Yes      | Protein amino-acid sequence |
+| `affinity`            | Optional | Ground-truth affinity label |
 
 Example:
 
-```csv
+```
 compound_iso_smiles,target_sequence,affinity
 CCO,MKT...,10.21
 CCN,MSA...,11.04
 ```
 
-The `affinity` column is not consumed by MPC inference and may be absent on hidden evaluation data.
+The `affinity` column is only used for accuracy evaluation.
 
-Alternative column names may be supplied using:
+It is not consumed during MPC inference.
 
-```text
---smiles-column
---protein-column
---affinity-column
+Hidden evaluation datasets can be processed using the same format.
+
+------
+
+## 4.2 Prepare a new dataset
+
+For a new evaluation dataset:
+
 ```
-
----
-
-## 5.2 Prepare a new dataset
-
-```bash
 python3 reference/prepare_dataset.py \
-  --csv data/new_test.csv \
-  --output "$DDG_WORK/new_test_prepared" \
+  --csv data/new_dataset.csv \
+  --output "$DDG_WORK/new_dataset_prepare" \
   --bw 64 \
   --scale 12
 ```
 
-For a small smoke test:
+For debugging:
 
-```bash
+```
 python3 reference/prepare_dataset.py \
-  --csv data/new_test.csv \
-  --output "$DDG_WORK/new_test_prepared" \
+  --csv data/new_dataset.csv \
+  --output "$DDG_WORK/new_dataset_prepare" \
   --bw 64 \
   --scale 12 \
   --limit 3
 ```
 
-Show all options with:
+Available options:
 
-```bash
+```
 python3 reference/prepare_dataset.py --help
 ```
 
----
+Important parameters:
 
-## 5.3 Prepared private drug format
+| Option     | Description                  |
+| ---------- | ---------------------------- |
+| `--csv`    | input CSV dataset            |
+| `--output` | generated prepared directory |
+| `--bw`     | MPC ring bit width           |
+| `--scale`  | fixed-point scale            |
+| `--nmax`   | maximum molecule graph size  |
+| `--limit`  | debug subset only            |
 
-For each sample:
+------
 
-### Node features
+## 4.3 Prepared private drug format
 
-```text
-shape      [138, 94]
-scale      12
-privacy    secret-shared
+Each drug molecule is converted into a fixed-size graph representation.
+
+Current configuration:
+
+```
+nmax = 138
+
+feature dimension = 94
 ```
 
-### Raw adjacency
+The generated private components are:
 
-```text
-shape      [138, 138]
-values     {0,1}
-self-loop  included for real atoms
-scale      0
-privacy    secret-shared
+```
+Node features:
+
+shape:
+[138, 94]
+
+privacy:
+secret-shared
+Adjacency:
+
+shape:
+[138, 138]
+
+values:
+{0,1}
+
+self-loop:
+included
+
+privacy:
+secret-shared
+Pooling mask:
+
+shape:
+[138,376]
+
+privacy:
+secret-shared
 ```
 
-### Pooling mask
+The dataset preparation stage stores raw adjacency.
 
-```text
-shape      [138, 376]
-scale      0
-privacy    secret-shared
+Normalized adjacency is computed securely during MPC inference.
+
+------
+
+## 4.4 Public protein format
+
+Protein sequences are treated as public input.
+
+The sequence processing follows the DeepDTAGen encoding:
+
 ```
+Protein sequence
 
-The adjacency is intentionally stored as raw binary adjacency.
+        │
 
-`A_norm` is not precomputed.
+        ▼
 
----
+DeepDTAGen token mapping
 
-## 5.4 Public protein format
+        │
 
-The protein sequence is encoded using the DeepDTAGen sequence mapping and padded/truncated to:
+        ▼
 
-```text
-length = 1000
-```
-
-It is written to:
-
-```text
 target_ids.dat
 ```
 
-as little-endian `int64`.
+Current configuration:
 
-Dataset preparation does not run the Protein Gated-CNN.
-
----
-
-## 5.5 Prepared directory
-
-```text
-new_test_prepared/
-├── x_share0.dat
-├── x_share1.dat
-├── adj_share0.dat
-├── adj_share1.dat
-├── mask_share0.dat
-├── mask_share1.dat
-├── target_ids.dat
-├── metadata.json
-└── affinity.npy       # only if labels exist
+```
+sequence length = 1000
 ```
 
-Online deployment:
+The Protein Gated-CNN is executed online using the original checkpoint.
 
-```text
+No precomputed:
+
+```
+protein_emb.dat
+```
+
+is required.
+
+------
+
+## 4.5 Prepared directory
+
+The generated directory contains:
+
+```
+new_dataset_prepare/
+
+├── x_share0.dat
+
+├── x_share1.dat
+
+├── adj_share0.dat
+
+├── adj_share1.dat
+
+├── mask_share0.dat
+
+├── mask_share1.dat
+
+├── target_ids.dat
+
+├── metadata.json
+
+└── affinity.npy
+```
+
+Deployment mapping:
+
+```
 Server P0:
-    x_share0.dat
-    adj_share0.dat
-    mask_share0.dat
+
+x_share0.dat
+
+adj_share0.dat
+
+mask_share0.dat
+
 
 Server P1:
-    x_share1.dat
-    adj_share1.dat
-    mask_share1.dat
+
+x_share1.dat
+
+adj_share1.dat
+
+mask_share1.dat
+
 
 Both:
-    target_ids.dat
+
+target_ids.dat
 ```
 
----
+------
 
-## 5.6 Expected output
+## 4.6 Expected output
 
-A successful preparation prints:
+Successful preparation:
 
-```text
+```
 PREPARE DATASET: PASS
+
 samples = ...
+
 output = ...
+
 protein = public target_ids.dat; NO protein_emb.dat
+
 adj = raw binary + self-loops, scale=0
 ```
 
-Inspect:
+Metadata:
 
-```bash
-cat "$DDG_WORK/new_test_prepared/metadata.json"
+```
+cat "$DDG_WORK/new_dataset_prepare/metadata.json"
 ```
 
----
+contains:
 
-## 5.7 Secret-sharing randomness
+```
+number of samples
 
-By default, the production preparation path uses OS cryptographic randomness for additive secret splitting.
+feature dimension
+
+graph configuration
+
+sharing method
+
+protein format
+
+fixed-point configuration
+```
+
+------
+
+## 4.7 Secret-sharing randomness
+
+The production dataset preparation path uses operating-system cryptographic
+ randomness for additive secret sharing.
 
 The option:
 
-```text
+```
 --deterministic-seed
 ```
 
-is intended only for debugging and regression tests.
+is provided only for debugging and regression testing.
 
-It should not be used for production secret sharing.
+It should not be used for production dataset preparation.
 
 ---
 
-# 6. Model Preparation
+# 5. Model Preparation
 
-## 6.1 Model execution split
+The submitted solution separates the DeepDTAGen model into:
 
-The original `.pth` checkpoint serves two purposes:
+```
+Public Protein branch
 
-```text
-Original .pth
-    │
-    ├── public Protein Gated-CNN
-    │
-    └── model preparation
-            │
-            ▼
-        weights.bin
-            │
-            ▼
-       MPC model path
+        +
+
+Private Drug / Fusion MPC branch
 ```
 
-Therefore both are required:
+The original DeepDTAGen checkpoint is used for both:
 
-```text
-original .pth
+```
+Original .pth checkpoint
+
+        │
+
+        ├── Public Protein Gated-CNN
+        │
+        └── MPC model conversion
+
+                │
+
+                ▼
+
+             weights.bin
+```
+
+Therefore, a complete deployment requires:
+
+```
+1. Original DeepDTAGen checkpoint (.pth)
+
+2. MPC-compatible weights.bin
+```
+
+------
+
+## 5.1 Model execution split
+
+The current inference architecture is:
+
+```
+Drug branch:
+
+private input
+
+        │
+
+        ▼
+
+GPU-MPC inference
+
+        │
+
+        ▼
+
+128-dimensional drug representation
+
+
+
+Protein branch:
+
+public sequence
+
+        │
+
+        ▼
+
+FP32 GPU Gated-CNN
+
+        │
+
+        ▼
+
+128-dimensional protein representation
+
+
+
+Fusion:
+
+drug vector + protein vector
+
+        │
+
+        ▼
+
+GPU-MPC affinity prediction
+```
+
+The Protein Gated-CNN remains public and uses the original checkpoint.
+
+The MPC backend uses converted model parameters stored in:
+
+```
 weights.bin
 ```
 
----
+------
 
-## 6.2 Prepare weights
+## 5.2 Prepare weights
 
-```bash
+Convert a DeepDTAGen checkpoint:
+
+```
 python3 reference/prepare_model.py \
   --checkpoint model/deepdtagen_model_kiba.pth \
-  --output "$DDG_WORK/kiba_model_prepared" \
+  --output "$DDG_WORK/kiba_model" \
   --scale 12
 ```
 
-Generated files:
+The generated directory:
 
-```text
-$DDG_WORK/kiba_model_prepared/
+```
+$DDG_WORK/kiba_model/
+
 ├── weights.bin
+
 ├── weights.bin.json
+
 └── model_metadata.json
 ```
 
-The MPC binary contains parameters for:
+Show available options:
 
-```text
-GCN ×3
-Drug FC ×2
-Fusion FC ×4
+```
+python3 reference/prepare_model.py --help
 ```
 
-for 9 MPC parameter groups in total.
+------
 
----
+## 5.3 Expected output
 
-## 6.3 Expected output
+Successful model preparation:
 
-```text
+```
 PREPARE MODEL: PASS
+
 checkpoint = ...
+
 weights = ...
+
 scale = 12
+
 MPC layers = 9
+
 Protein = original .pth cnn.* (timed FP32 GPU)
 ```
 
-Inspect:
+The generated `weights.bin` contains parameters required by the MPC path:
 
-```bash
-cat "$DDG_WORK/kiba_model_prepared/model_metadata.json"
+```
+GCN layers
+
+Drug fully-connected layers
+
+Fusion fully-connected layers
 ```
 
----
+The original `.pth` checkpoint remains required for:
 
-## 6.4 Replacing model weights
+```
+Public Protein Gated-CNN inference
+```
 
-For a compatible replacement checkpoint:
+------
 
-```bash
+## 5.4 Replacing model weights
+
+A compatible DeepDTAGen checkpoint can be converted using:
+
+```
 python3 reference/prepare_model.py \
   --checkpoint model/new_model.pth \
-  --output "$DDG_WORK/new_model_prepared" \
+  --output "$DDG_WORK/new_model" \
   --scale 12
 ```
 
 Then use:
 
-```text
-$DDG_WORK/new_model_prepared/weights.bin
+```
+$DDG_WORK/new_model/weights.bin
 ```
 
-for the MPC path, while passing:
+for MPC inference.
 
-```text
+The corresponding checkpoint:
+
+```
 model/new_model.pth
 ```
 
-to the public protein runner.
+is passed to the Protein Gated-CNN execution path.
 
-A compatible replacement checkpoint does not require C++ source modification.
+A replacement checkpoint must preserve:
 
-A checkpoint with a different network architecture is not automatically compatible.
+```
+DeepDTAGen affinity branch architecture
+
+layer dimensions
+
+parameter naming compatibility
+```
+
+A checkpoint with a different network architecture requires additional MPC
+ implementation changes.
+
+------
+
+## 5.5 Model submission requirements
+
+For final deployment, the following files must be provided:
+
+```
+DeepDTAGen checkpoint:
+
+model/*.pth
+
+
+Converted MPC weights:
+
+weights.bin
+
+weights.bin.json
+```
+
+The model replacement procedure is also described in:
+
+```
+TRACK3_SUBMISSION.md
+```
 
 ---
 
-# 7. Offline Dealer
+# 6. Offline Dealer
 
-## 7.1 Purpose
+## 6.1 Purpose
 
-The trusted Offline Dealer generates the complete correlated FSS key streams
-required by the two online Evaluators.
+The trusted Offline Dealer generates the complete correlated FSS key material
+ required by the two online MPC Evaluators.
 
-```text
-prepared private shares + public model
-                │
-                ▼
-         trusted Offline Dealer
-                │
-          ┌─────┴─────┐
-          ▼           ▼
-         K0          K1
-          │           │
-          ▼           ▼
-      Server P0   Server P1
+The current workflow is:
 
-          Dealer exits
+```
+Prepared private shares
+        +
+Public model weights
+        │
+        ▼
+ Trusted Offline Dealer
+        │
+        ├── generate K0
+        │
+        └── generate K1
+        │
+        ▼
+ Distribute party-specific keys
+
+        K0 → Server P0
+
+        K1 → Server P1
 ```
 
-The current implementation uses **one logical Dealer**.
+The Dealer is an offline preprocessing component.
 
-The Dealer generates the two party-specific key streams sequentially:
+It does not participate in online MPC inference.
 
-```text
+After generating and distributing the keys:
+
+```
+Dealer exits
+
+        ↓
+
+Server P0  <──── GPU-MPC / 2PC ────>  Server P1
+```
+
+The current implementation uses one logical trusted Dealer:
+
+```
 Dealer:
-    generate K0
-        ↓
-    generate K1
-        ↓
-    exit
+
+generate K0
+
+generate K1
+
+exit
 ```
 
-The Dealer script does not start either online Evaluator.
+------
 
----
+## 6.2 Storage requirement
 
-## 7.2 Storage requirement
+FSS key files can be large.
 
-FSS key files are large.
+The current production configuration:
 
-For the current configuration:
+```
+BW              = 64
 
-```text
-BW     = 64
-SCALE  = 12
-B      = 8
-A_norm = secure online
+SCALE           = 12
+
+micro-batch     = 8
+
+secure A_norm   = enabled
 ```
 
-one FSS key chunk occupies:
+generates approximately:
 
-```text
-2,954,940,416 bytes / party
+```
+K0:
+
+2,954,940,416 bytes
+
+
+K1:
+
+2,954,940,416 bytes
 ```
 
-which is approximately:
+Total:
 
-```text
-2.955 GB / party
-2.752 GiB / party
 ```
-
-Therefore a single B8 chunk requires approximately:
-
-```text
 K0 + K1 ≈ 5.91 GB
 ```
 
-of persistent storage across the two key files.
+The required storage depends on the number of internal MPC chunks:
 
-Before generating keys, verify the selected filesystem:
-
-```bash
-df -h "$DDG_WORK"
 ```
-
-Do not place large FSS key directories on a small container overlay or `/tmp`
-unless sufficient free space has explicitly been verified.
+chunks = ceil(N / B)
+```
 
 For example:
 
-```bash
-export DDG_WORK="$WORKSPACE/runtime"
+| Logical N | Micro-batch B | Chunks | Approx. key size / party |
+| --------- | ------------- | ------ | ------------------------ |
+| 8         | 8             | 1      | 2.95 GB                  |
+| 16        | 8             | 2      | 5.91 GB                  |
+| 64        | 8             | 8      | 23.64 GB                 |
+| 128       | 8             | 16     | 47.28 GB                 |
 
-mkdir -p "$DDG_WORK"
+Before key generation:
 
+```
 df -h "$DDG_WORK"
 ```
 
-The filesystem containing `$DDG_WORK` must have enough capacity for both party
-key files.
+should be used to verify available storage.
 
----
+Large generated key directories should be placed on a filesystem with
+ sufficient capacity.
 
-## 7.3 Generate complete offline keys
+------
 
-A validated example for:
+## 6.3 Generate complete offline keys
 
-```text
-logical N   = 3
-micro-batch = 8
+The current production path generates complete FSS key streams offline.
+
+Example:
+
 ```
-
-is:
-
-```bash
 python3 gpu_mpc/run_offline_dealer.py \
   "$DDG_WORK/davis3_prepare" \
   "$DDG_WORK/kiba_model/weights.bin" \
@@ -1498,9 +1213,9 @@ python3 gpu_mpc/run_offline_dealer.py \
   --gpu 0
 ```
 
-The general form is:
+General format:
 
-```bash
+```
 python3 gpu_mpc/run_offline_dealer.py \
   PREPARED_DATASET_DIR \
   PREPARED_WEIGHTS_BIN \
@@ -1512,275 +1227,390 @@ python3 gpu_mpc/run_offline_dealer.py \
   --gpu GPU_ID
 ```
 
-Show all available options with:
+Available options:
 
-```bash
+```
 python3 gpu_mpc/run_offline_dealer.py --help
 ```
 
-Important options include:
+Important parameters:
 
-```text
---num-samples
---micro-batch
---bw
---scale
---gpu
---keybuf-cap-gb
---force
---keep-work
+| Option          | Description                   |
+| --------------- | ----------------------------- |
+| `--num-samples` | logical input sample count    |
+| `--micro-batch` | internal fixed MPC batch size |
+| `--bw`          | ring bit width                |
+| `--scale`       | fixed-point scale             |
+| `--gpu`         | GPU used by Dealer            |
+| `--keep-work`   | retain temporary files        |
+
+The generated key material corresponds to the secure online computation path:
+
 ```
+A_raw adjacency
 
-The option:
+        ↓
 
-```text
---legacy-precomputed-adj
-```
+degree computation
 
-is intended only for debug/regression experiments.
+        ↓
 
-The default path generates key material for secure online computation of:
+normalization
 
-```text
-A_raw
-  ↓
-degree
-  ↓
-D^(-1/2)
-  ↓
+        ↓
+
 A_norm
+
+        ↓
+
+GPU-MPC inference
 ```
 
----
+------
 
-## 7.4 Output files
+## 6.4 Output files
 
-For `BW=64`, `SCALE=12`, the generated directory has the form:
+Generated key directory:
 
-```text
+```
 davis3_keys/
+
 ├── DeepDTAGen_64_12_party0_inference_key0.dat
+
 ├── DeepDTAGen_64_12_party1_inference_key1.dat
+
 ├── metadata.json
+
 └── logs/
+
     ├── dealer_keygen_k0.log
+
     └── dealer_keygen_k1.log
 ```
 
-For one B8 chunk:
+The metadata records:
 
-```text
-K0 = 2,954,940,416 bytes
-K1 = 2,954,940,416 bytes
 ```
-
-The metadata records fields including:
-
-```text
 samples
+
 micro_batch
+
 chunks
+
 padded_samples
+
 bw
+
 scale
+
 secure_adj_norm
+
 key_chunk_bytes_per_party
+
 key_total_bytes_per_party
+
 logical_dealer_count
+
 online_evaluator_started
+
 status
 ```
 
-For the validated N=3 example:
+Example:
 
-```text
-samples                    = 3
-micro_batch                = 8
-chunks                     = 1
-padded_samples             = 5
-bw                         = 64
-scale                      = 12
-secure_adj_norm            = true
-logical_dealer_count       = 1
-online_evaluator_started   = false
-status                     = PRE_COMPLIANCE
+```
+samples                  = 3
+
+micro_batch              = 8
+
+chunks                   = 1
+
+bw                       = 64
+
+scale                    = 12
+
+secure_adj_norm          = true
+
+logical_dealer_count     = 1
+
+online_evaluator_started = false
 ```
 
----
+------
 
-## 7.5 Fixed micro-batches
+## 6.5 Fixed micro-batches
 
-Logical dataset size `N` and internal MPC micro-batch size `B` are separate.
+Logical sample number `N` and internal MPC micro-batch size `B` are independent.
 
-For example:
+Example:
 
-```text
+```
 N = 17
+
 B = 8
 ```
 
-produces:
+The execution becomes:
 
-```text
-chunk 0: 8 real samples
-chunk 1: 8 real samples
-chunk 2: 1 real sample + 7 padding samples
+```
+chunk 0:
+
+8 real samples
+
+
+chunk 1:
+
+8 real samples
+
+
+chunk 2:
+
+1 real sample
+
+7 padding samples
 ```
 
-The number of FSS chunks is:
+The backend removes padding outputs before returning final predictions.
 
-```text
+The number of generated key chunks is:
+
+```
 chunks = ceil(N / B)
 ```
 
-For the current B8 computation graph:
+------
 
-```text
-key bytes / party
-=
-ceil(N / 8) × 2,954,940,416
+## 6.6 Key distribution
+
+After Dealer generation:
+
+```
+K0 → Server P0
+
+K1 → Server P1
 ```
 
-For example:
+Each online server receives only its own key and private input share.
 
-| Logical N | B8 chunks | Approx. key size / party |
-|---:|---:|---:|
-| 8 | 1 | 2.95 GB |
-| 16 | 2 | 5.91 GB |
-| 128 | 16 | 47.28 GB |
-| 512 | 64 | 189.12 GB |
+Online separation:
+
+```
+Server P0:
+
+private drug share0
+
+FSS key K0
+
+
+Server P1:
+
+private drug share1
+
+FSS key K1
+```
+
+The Dealer terminates before online inference.
+
+Complete lifecycle:
+
+```
+OFFLINE
+
+Trusted Dealer
+
+    generate K0
+
+    generate K1
+
+    distribute keys
+
+    terminate
+
+
+ONLINE
+
+Server P0  <──── GPU-MPC / 2PC ────>  Server P1
+```
+
+------
+
+## 6.7 Validated Dealer smoke test
+
+The current implementation has been validated with:
+
+```
+N      = 3
+
+B      = 8
+
+BW     = 64
+
+SCALE  = 12
+
+A_norm = secure online
+```
+
+Example output:
+
+```
+[offline-dealer] generate K0
+
+[offline-dealer] generate K1
+
+
+key bytes/chunk/party = 2,954,940,416
+
+key bytes/party       = 2,954,940,416
+
+total K0+K1 bytes     = 5,909,880,832
+
+
+OFFLINE DEALER: PASS
+```
+
+Detailed benchmark information is maintained in:
+
+```
+docs/VALIDATION_RESULTS.md
+```
+
+------
+
+## 6.8 Timing and compliance note
+
+Dealer timing is reported separately:
+
+```
+[DDG_TIME][OFFLINE_INPUT_FORMAT]
+
+[DDG_TIME][OFFLINE_DEALER_KEYGEN]
+
+[DDG_TIME][OFFLINE_DEALER_TOTAL]
+
+[DDG_TIME][OFFLINE_KEY_DISTRIBUTION]
+```
+
+The current implementation separates:
+
+```
+Offline:
+
+Dataset preparation
+
+Dealer key generation
+
+Key distribution
+
+
+Online:
+
+Evaluator setup
+
+GPU-MPC inference
+
+Affinity prediction
+```
+
+The final competition timing boundary depends on the official evaluation
+ procedure defined by the organizers.
+
+Therefore, the repository reports each lifecycle stage explicitly without
+ assuming a specific treatment of offline preprocessing.
+
 
 ---
 
-## 7.6 Key distribution
 
-After generation:
+# 7. Running Inference
 
-```text
-K0 → Server P0 only
-K1 → Server P1 only
+The inference workflow consists of:
+
+```
+Prepared dataset
+        │
+        ▼
+Offline FSS key generation
+        │
+        ▼
+Online two-party GPU-MPC inference
+        │
+        ▼
+Continuous affinity prediction
 ```
 
-The intended online separation is:
+The current production path uses:
 
-```text
-Server P0:
-    private share0
-    K0
+```
+Evaluator key mode:
 
-Server P1:
-    private share1
-    K1
+offline generated FSS keys
+        │
+        ▼
+direct full-RAM preload
+        │
+        ▼
+online MPC execution
 ```
 
-The Dealer terminates before online inference and is not an online MPC
-participant.
+The complete inference lifecycle is:
 
-The intended lifecycle is therefore:
-
-```text
+```
 OFFLINE
 
 Trusted Dealer
     │
     ├── generate K0
     ├── generate K1
-    ├── distribute K0 → P0
-    ├── distribute K1 → P1
     │
-    └── terminate
+    ├── distribute K0 → Server P0
+    └── distribute K1 → Server P1
 
 
 ONLINE
 
-Server P0  <──── GPU-MPC / 2PC ────>  Server P1
-share0 + K0                           share1 + K1
+Server P0                    Server P1
+---------                    ---------
+drug share0                 drug share1
+K0                          K1
+public weights              public weights
+                            public protein checkpoint
+
+        │                         │
+        └──── GPU-MPC / 2PC ──────┘
+
+                    │
+                    ▼
+
+          affinity prediction
 ```
 
----
+------
 
-## 7.7 Validated Dealer smoke test
+## 7.1 Single-machine two-party run
 
-The current implementation has been validated with:
+The local validation environment runs two MPC parties on one machine.
 
-```text
-N      = 3
-B      = 8
-BW     = 64
-SCALE  = 12
-A_norm = secure online
+Topology:
+
+```
+GPU 0                     GPU 1
+P0                        P1
+│                         │
+share0                    share1
+K0                        K1
+│                         │
+└────── GPU-MPC 2PC ──────┘
 ```
 
-A validated run produced:
+The validated local entry point is:
 
-```text
-[offline-dealer] generate K0: chunks=1 B=8 GPU=0
-[offline-dealer] K0 complete: 6.120873 s
-
-[offline-dealer] generate K1: chunks=1 B=8 GPU=0
-[offline-dealer] K1 complete: 6.121321 s
-
-key bytes/chunk/party = 2,954,940,416
-key bytes/party       = 2,954,940,416
-total K0+K1 bytes     = 5,909,880,832
-
-OFFLINE DEALER: PASS
-Dealer lifecycle complete; no online evaluator was started.
+```
+gpu_mpc/run_offline_online_local.py
 ```
 
-The same run reported approximately:
+Example:
 
-```text
-K0 generation wall = 6.121 s
-K1 generation wall = 6.121 s
-Dealer total wall  = 12.243 s
 ```
-
-These values are development-machine smoke-test measurements and are not final
-competition performance results.
-
----
-
-## 7.8 Timing and compliance note
-
-Dealer execution is reported explicitly:
-
-```text
-[DDG_TIME][OFFLINE_INPUT_FORMAT]
-[DDG_TIME][OFFLINE_DEALER_KEYGEN]
-[DDG_TIME][OFFLINE_DEALER_TOTAL]
-[DDG_TIME][OFFLINE_KEY_DISTRIBUTION]
-```
-
-The current implementation retains:
-
-```text
-status=PRE_COMPLIANCE
-```
-
-because the final competition timing treatment of model-specific correlated
-FSS preprocessing should be confirmed with the organizers.
-
-This README does not assume that model-specific Dealer preprocessing is
-automatically excluded from the final competition runtime metric.
----
-
-# 8. Running Inference
-
-## 8.1 Single-machine two-party run
-
-The currently validated local topology uses two GPUs on one physical host:
-
-```text
-Evaluator P0 → GPU 0
-Evaluator P1 → GPU 1
-peer IP      → 127.0.0.1
-peer ports   → 42003 / 42006
-```
-
-Run:
-
-```bash
 python3 gpu_mpc/run_offline_online_local.py \
   "$DDG_WORK/davis3_prepare" \
   "$DDG_WORK/kiba_model/weights.bin" \
@@ -1796,930 +1626,857 @@ python3 gpu_mpc/run_offline_online_local.py \
   --full-key-ram
 ```
 
-For debugging:
+Important parameters:
 
-```text
---keep-work
+```
+--num-samples
+    logical inference sample count
+
+--micro-batch
+    fixed internal MPC batch size
+
+--bw
+    ring bit width
+
+--scale
+    fixed-point scale
+
+--gpu0 / --gpu1
+    GPUs assigned to the two MPC parties
+
+--full-key-ram
+    preload complete FSS key files into evaluator memory
 ```
 
-retains temporary fixed-micro-batch inputs and evaluator logs.
----
+------
 
-## 8.2 One-sample smoke test
+## 7.2 One-sample smoke test
 
-The external logical sample count may be smaller than the MPC micro-batch.
+The external logical sample count does not need to equal the internal MPC
+ micro-batch size.
 
 Example:
 
-```text
-N = 1
-B = 8
 ```
+logical samples:
 
-internally becomes:
+N = 1
 
-```text
+
+internal MPC execution:
+
+B = 8
+
 1 real sample
 7 padding samples
 ```
 
-but only one logical affinity result is returned.
+The MPC backend executes a fixed-size batch, then removes padded outputs before
+ returning the final affinity prediction.
 
-One complete B8 FSS key chunk is still required.
+------
 
----
+## 7.3 Full-RAM key lifecycle
 
-## 8.3 Full-RAM lifecycle
+The current implementation uses direct full-RAM FSS evaluation.
 
-With:
+Lifecycle:
 
-```text
---full-key-ram
 ```
-
-the Evaluator lifecycle is:
-
-```text
-SETUP
-    │
-    ├── start P0/P1
-    ├── load complete K0/K1
-    ├── initialize backend
-    ├── connect MPC peer
-    │
-    ▼
-READY0 + READY1
-    │
-    ▼
------ ONLINE COMPUTE -----
-    │
-public Protein Gated-CNN
-    │
-    ▼
 START
-    │
-    ▼
-secure A_norm
-    │
-    ▼
-MPC inference
-    │
-    ▼
-affinity
------ ONLINE COMPLETE -----
+
+Evaluator P0/P1 process launch
+            │
+            ▼
+Load complete K0/K1
+            │
+            ▼
+Initialize GPU-MPC backend
+            │
+            ▼
+Establish MPC peer connection
+            │
+            ▼
+READY synchronization
+            │
+            ▼
+ONLINE COMPUTATION
+            │
+            ▼
+Affinity output
+
+END
 ```
 
-Evaluator logs should show:
+During online computation:
 
-```text
-[DDG_PRELOAD][KEY]
-[DDG_BARRIER][READY]
-[DDG_BARRIER][START]
-[DDG_PROFILE][EVAL]
+- FSS keys are accessed from memory;
+- No external key streaming is used.
+- The online phase operates entirely on the preloaded FSS RAM buffer.
+- no key-slot management is required;
+- micro-batches access preloaded key material through offsets.
+
+------
+
+## 7.4 Online runner parameters
+
+Show available options:
+
 ```
-
-in that order.
-
----
-
-## 8.4 Online runner parameters
-
-Show all options:
-
-```bash
 python3 gpu_mpc/run_offline_online_local.py --help
 ```
 
-Important parameters:
+Main options:
 
-| Option | Meaning |
-|---|---|
-| `--protein-checkpoint` | original DeepDTAGen `.pth` containing `cnn.*` |
-| `--num-samples` | logical sample count |
-| `--micro-batch` | fixed internal MPC batch |
-| `--bw` | ring bit width |
-| `--scale` | fixed-point scale |
-| `--gpu0` | local GPU for P0 |
-| `--gpu1` | local GPU for P1 |
-| `--ip` | `GpuPeer` address |
-| `--full-key-ram` | preload complete key file |
-| `--keep-work` | retain debug files |
+| Option                 | Description                                                  |
+| ---------------------- | ------------------------------------------------------------ |
+| `--protein-checkpoint` | DeepDTAGen `.pth` checkpoint containing public Protein Gated-CNN parameters |
+| `--num-samples`        | logical input sample number                                  |
+| `--micro-batch`        | internal MPC batch size                                      |
+| `--bw`                 | ring bit width                                               |
+| `--scale`              | fixed-point scale                                            |
+| `--gpu0`               | GPU assigned to party P0                                     |
+| `--gpu1`               | GPU assigned to party P1                                     |
+| `--ip`                 | MPC peer address                                             |
+| `--full-key-ram`       | enable complete FSS key preload                              |
+| `--keep-work`          | keep temporary debugging files                               |
 
-The current GPU-MPC backend uses two TCP ports:
+------
 
-```text
-42003
-42006
+## 7.5 Two-server deployment
+
+For physical deployment, each online party runs independently.
+
+The entry point is:
+
 ```
-
-The secondary connection uses the backend default `port + 3`.
-
----
-
-## 8.5 Two-server deployment
-
-The repository provides a per-party online launcher:
-
-```text
 gpu_mpc/run_offline_online_party.py
 ```
 
-It is intended to run independently on the two online MPC servers.
+Each server receives only its own private share and FSS key.
 
-The per-party launcher has been validated using two isolated party directories,
-two independent Python launcher processes, and two GPUs on the same host.
+Deployment model:
 
-> **Physical two-host status: NOT YET VALIDATED**
->
-> The launcher interface and party isolation have been validated locally, but
-> the current results must not be presented as physical cross-machine network
-> measurements until the same commands have been executed on two independent
-> servers.
+```
+                 OFFLINE
 
-### 8.5.1 Intended deployment
-
-```text
-                      OFFLINE
-
-                 trusted Dealer
-                    /       \
-                   K0       K1
-                   |         |
-              Dealer exits completely
+              Trusted Dealer
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+         K0                  K1
+          │                   │
+          ▼                   ▼
 
 
-                       ONLINE
+                 ONLINE
 
-          Server P0                  Server P1
-        ---------------            ---------------
-        drug share0                 drug share1
-        K0                          K1
-        public weights              public weights
-                                    public protein
-                                    public checkpoint
+        Server P0              Server P1
 
-              |                         |
-              +------ GPU-MPC ----------+
-                    TCP 42003 / 42006
+        share0                 share1
+        K0                     K1
+        weights                weights
+                               protein checkpoint
 
-              +--- launcher control ----+
-                     TCP 42004
+             │                    │
+             └──── GPU-MPC 2PC ───┘
 ```
 
-The Dealer is not an online MPC party.
+------
 
-For final physical deployment:
+## 7.5.1 Server P0
 
-```text
-Server P0 must not contain share1 or K1.
-Server P1 must not contain share0 or K0.
+Run:
+
 ```
-
-The public model parameters and public Protein input may be distributed as
-needed.
-
-### 8.5.2 Network convention
-
-The current GPU-MPC backend establishes two TCP connections:
-
-```text
-TCP 42003
-TCP 42006
-```
-
-The second GPU-MPC connection uses the backend default `port + 3`.
-
-The per-party launcher coordination channel uses:
-
-```text
-TCP 42004
-```
-
-Therefore the complete current network interface is:
-
-```text
-TCP 42003    GPU-MPC data channel
-TCP 42006    GPU-MPC secondary data channel
-TCP 42004    per-party launcher control channel
-```
-
-Party convention:
-
-```text
-P0:
-    listens for GPU-MPC connections on TCP 42003 and 42006
-    listens for the launcher control connection on TCP 42004
-
-P1:
-    connects to Server P0 on TCP 42003 and 42006
-    connects to Server P0 on TCP 42004 for launcher coordination
-```
-
-Therefore `--peer-ip` must be the address of Server P0 that is reachable from
-Server P1.
-
-The underlying GPU-MPC `Peer` client retries failed connection attempts until
-the P0 listener becomes available. Therefore the per-party launcher does not
-require a fixed startup delay under normal operation.
-
-On a physical deployment, the firewall/security-group configuration must allow
-Server P1 to reach Server P0 on all of the following TCP ports:
-
-```text
-42003
-42004
-42006
-```
-
-### 8.5.3 Server P0
-
-Assume:
-
-```bash
-export SERVER0_IP="<SERVER0_REACHABLE_IP>"
-
-export P0_SOURCE="<P0_PREPARED_INPUT_DIRECTORY>"
-export P0_KEYS="<P0_OFFLINE_KEY_DIRECTORY>"
-
-export WEIGHTS="<PATH_TO_weights.bin>"
-
-export N=8
-export B=8
-```
-
-The P0 source directory needs only the P0 private input shares:
-
-```text
-metadata.json
-x_share0.dat
-adj_share0.dat
-mask_share0.dat
-```
-
-The P0 key directory needs:
-
-```text
-metadata.json
-DeepDTAGen_64_12_party0_inference_key0.dat
-```
-
-Start Server P0:
-
-```bash
 python3 gpu_mpc/run_offline_online_party.py \
-  "$P0_SOURCE" \
-  "$WEIGHTS" \
-  "$P0_KEYS" \
+  "$DDG_WORK/prepared_dataset" \
+  "$DDG_WORK/model/weights.bin" \
+  "$DDG_WORK/keys" \
   --party 0 \
-  --peer-ip "$SERVER0_IP" \
-  --num-samples "$N" \
-  --micro-batch "$B" \
+  --peer-ip SERVER_P0_IP \
+  --num-samples N \
+  --micro-batch B \
   --bw 64 \
   --scale 12 \
   --gpu 0 \
-  --control-bind 0.0.0.0 \
-  --control-port 42004 \
   --full-key-ram
 ```
 
-P0 waits for Server P1 and automatically coordinates the READY/START lifecycle.
+P0 provides:
 
-The optional `--peer-start-delay` argument defaults to `0.0`. The underlying
-GPU-MPC peer client retries failed connection attempts until the P0 listener is
-available, so a fixed launcher-side delay is not required for normal deployment.
+```
+private drug share0
 
+K0
 
-### 8.5.4 Server P1
-
-Assume:
-
-```bash
-export SERVER0_IP="<SERVER0_REACHABLE_IP>"
-
-export P1_SOURCE="<P1_PREPARED_INPUT_DIRECTORY>"
-export P1_KEYS="<P1_OFFLINE_KEY_DIRECTORY>"
-
-export WEIGHTS="<PATH_TO_weights.bin>"
-export CHECKPOINT="<PATH_TO_DEEPDTAGEN_CHECKPOINT>"
-
-export N=8
-export B=8
+public MPC parameters
 ```
 
-The P1 source directory needs:
+------
 
-```text
-metadata.json
-x_share1.dat
-adj_share1.dat
-mask_share1.dat
-target_ids.dat
+## 7.5.2 Server P1
+
+Run:
+
 ```
-
-`target_ids.dat` represents the public Protein input.
-
-The P1 key directory needs:
-
-```text
-metadata.json
-DeepDTAGen_64_12_party1_inference_key1.dat
-```
-
-Start Server P1 after P0 is running:
-
-```bash
 python3 gpu_mpc/run_offline_online_party.py \
-  "$P1_SOURCE" \
-  "$WEIGHTS" \
-  "$P1_KEYS" \
+  "$DDG_WORK/prepared_dataset" \
+  "$DDG_WORK/model/weights.bin" \
+  "$DDG_WORK/keys" \
   --party 1 \
-  --peer-ip "$SERVER0_IP" \
-  --protein-checkpoint "$CHECKPOINT" \
-  --num-samples "$N" \
-  --micro-batch "$B" \
+  --peer-ip SERVER_P0_IP \
+  --num-samples N \
+  --micro-batch B \
   --bw 64 \
   --scale 12 \
   --gpu 0 \
-  --control-port 42004 \
+  --protein-checkpoint model/deepdtagen_model_kiba.pth \
   --full-key-ram
 ```
 
-The launcher automatically performs:
+P1 provides:
 
-```text
-P0 evaluator launch
-        |
-        v
-P1 evaluator launch
-        |
-        v
-full-key preload
-        |
-        v
-P0 READY + P1 READY
-        |
-        v
-public Protein Gated-CNN on P1
-        |
-        v
-distributed START release
-        |
-        v
-secure A -> A_norm
-        |
-        v
-2PC DeepDTAGen affinity inference
+```
+private drug share1
+
+K1
+
+public Protein Gated-CNN checkpoint
 ```
 
-No manual filesystem START coordination between the two servers is required.
+------
 
-### 8.5.5 Local isolated deployment validation
+## 7.5.3 Network convention
 
-The per-party launcher was validated with two independent processes on the
-current two-GPU development host.
+The two-party deployment requires:
 
-The validation used separate party-specific input directories:
-
-```text
+```
 P0:
-    share0 only
-    K0 only
-    GPU 0
+    listens for MPC peer connection
+
 
 P1:
-    share1 only
-    K1 only
-    public target_ids.dat
-    GPU 1
+    connects to P0
 ```
 
-Configuration:
+The control and MPC communication ports are configured by the runner.
 
-```text
-logical N       = 3
-micro-batch B   = 8
-chunks          = 1
-padded N        = 8
-BW / SCALE      = 64 / 12
-secure A_norm   = enabled
-full-key RAM    = enabled
+Verify that:
+
+```
+P0 ↔ P1
 ```
 
-The P0 result was:
+network communication is available before starting inference.
 
-```text
-AFFINITY_GLOBAL[0]=11.827393
-AFFINITY_GLOBAL[1]=11.977295
-AFFINITY_GLOBAL[2]=11.341064
+------
 
-PASS: distributed per-party runner N=3, B=8, chunks=1, returned=3
-OFFLINE/ONLINE SEPARATION: PASS
-Dealer process was never started.
+## 7.6 Validation entry points
+
+Available execution checks:
+
+Dataset:
+
+```
+python3 reference/prepare_dataset.py --help
 ```
 
-P1 completed independently with:
+Model:
 
-```text
-PARTY 1: PASS
+```
+python3 reference/prepare_model.py --help
 ```
 
-These predictions exactly match the latest validated localhost
-`run_offline_online_local.py` smoke test.
+Offline Dealer:
 
-This validates:
-
-```text
-independent party launchers                 PASS
-party-specific private input isolation      PASS
-party-specific K0/K1 isolation              PASS
-full-key RAM preload                        PASS
-READY/START control lifecycle               PASS
-peer launch without fixed startup delay     PASS
-public Protein execution                    PASS
-secure online adjacency normalization       PASS
-2PC affinity output consistency             PASS
+```
+python3 gpu_mpc/run_offline_dealer.py --help
 ```
 
-It does **not** yet validate:
+Local two-party inference:
 
-```text
-physical cross-machine networking
-real inter-server RTT / bandwidth
-cloud firewall / security-group configuration
-physical two-server throughput
+```
+python3 gpu_mpc/run_offline_online_local.py --help
 ```
 
-Those measurements must be reported only after an actual two-host run.
+Two-server party inference:
 
-A second regression test was performed with:
-
-```text
-logical N       = 17
-micro-batch B   = 8
-chunks          = 3
-padded N        = 24
-padding samples = 7
+```
+python3 gpu_mpc/run_offline_online_party.py --help
 ```
 
-The per-party launcher completed successfully:
+Detailed validation results are recorded in:
 
-```text
-PASS: distributed per-party runner N=17, B=8, chunks=3, returned=17
-OFFLINE/ONLINE SEPARATION: PASS
-Dealer process was never started.
+```
+docs/VALIDATION_RESULTS.md
 ```
 
-The complete FSS key files were preloaded once per party:
-
-```text
-K0 bytes = 8,864,821,248
-K1 bytes = 8,864,821,248
-key bytes per chunk per party = 2,954,940,416
-```
-
-All three evaluator chunks completed on both parties, including the second and
-third full-key offsets.
-
-The 17 logical predictions produced by the per-party launcher were compared
-against `run_offline_online_local.py` using the same prepared inputs and
-offline keys. All 17 predictions matched exactly.
-----
-
-## 8.6 Validated local two-party smoke test
-
-The complete README execution path has been validated using:
-
-```text
-logical N       = 3
-micro-batch B   = 8
-BW / SCALE      = 64 / 12
-GPU P0 / P1     = 0 / 1
-peer IP         = 127.0.0.1
-key mode        = offline full file -> direct full RAM buffer
-Protein         = timed FP32 GPU
-A_norm          = secure online
-```
-
-The online runner confirmed:
-
-```text
-Dealer          = NOT STARTED
-key mode        = offline full file -> direct full RAM buffer
-Protein         = timed FP32 GPU
-A_norm          = secure online
-```
-
-The Evaluators reached the READY barrier before online computation:
-
-```text
-[driver] SETUP: both Evaluators READY
-```
-
-The public Protein Gated-CNN was then executed, followed by the START release:
-
-```text
-[driver] ONLINE: start timed public Protein GatedCNN
-[driver] ONLINE: Protein complete
-[driver] ONLINE: release Evaluators with START marker
-```
-
-Both Evaluators completed successfully:
-
-```text
-[driver] evaluator return codes: E0=0 E1=0
-```
-
-The logical outputs were:
-
-```text
-AFFINITY_GLOBAL[0]=11.827393
-AFFINITY_GLOBAL[1]=11.977295
-AFFINITY_GLOBAL[2]=11.341064
-```
-
-and the driver finished with:
-
-```text
-PASS: N=3, fixed B=8, chunks=1, padded=8, returned=3
-OFFLINE/ONLINE SEPARATION: PASS
-Dealer process was never started by this online runner.
-```
-
-The same run confirmed that the complete FSS keys had already been loaded into
-RAM before MPC chunk execution:
-
-```text
-P0 key_read_us = 0
-P1 key_read_us = 0
-```
-
-Representative timing from this functional run was:
-
-```text
-SETUP_TOTAL     ≈ 3.513 s
-PROTEIN         ≈ 2.618 s
-MPC compute     ≈ 0.372 s / party
-ONLINE_COMPUTE  ≈ 3.624 s
-END_TO_END      ≈ 7.137 s
-```
-
-This test uses **Davis input rows with the KIBA checkpoint** in order to validate
-the external input interface and complete execution lifecycle.
-
-It is **not a Davis model-accuracy benchmark**.
-
-The small `N=3` timing values are also not representative throughput results,
-because five of the eight internal B8 positions are padding and process/CUDA
-startup overhead dominates such a small workload.
 ---
 
-# 9. Timing
+# 8. Timing
 
-The runner currently reports:
+The implementation reports different execution stages separately to distinguish
+ offline preprocessing, setup overhead, and online MPC computation.
 
-```text
+The current timing categories are:
+
+```
 PREPROCESS_UNTIMED
+
 OFFLINE_DEALER
+
 OFFLINE_KEY_DISTRIBUTION
+
 KEY_PRELOAD
+
 SETUP_TOTAL
+
 PROTEIN
+
 EVALUATOR
+
 ONLINE_COMPUTE
+
 END_TO_END
 ```
 
----
+Detailed benchmark results and hardware-specific measurements are maintained
+ separately:
 
-## 9.1 Offline Dealer
+```
+docs/VALIDATION_RESULTS.md
+```
 
-```text
+------
+
+## 8.1 Offline Dealer
+
+```
 OFFLINE_DEALER
 ```
 
-is the complete trusted Dealer key-generation wall time.
+represents the complete trusted Dealer key-generation runtime.
 
-It is reported separately even when Dealer execution occurs before the two online servers start.
+The Dealer phase includes:
 
----
+```
+prepared private shares
+        +
+public model weights
+        │
+        ▼
+ trusted Offline Dealer
+        │
+        ├── generate K0
+        │
+        └── generate K1
+```
 
-## 9.2 Key preload
+The Dealer runs before online inference and is reported separately.
 
-```text
+The current submission workflow treats the Dealer as an offline trusted setup
+ component.
+
+------
+
+## 8.2 Key preload
+
+```
 KEY_PRELOAD
 ```
 
-measures loading one complete party key file into the final FSS host buffer.
+measures loading the complete party-specific FSS key file into the evaluator
+ memory buffer.
 
-In the current lifecycle:
+The current production path uses:
 
-```text
-included_in_online_wall = 0
-included_in_setup_wall  = 1
+```
+Evaluator key mode:
+
+offline generated FSS key
+        │
+        ▼
+direct full-RAM preload
+        │
+        ▼
+online MPC execution
 ```
 
----
+During online computation:
 
-## 9.3 Setup
+- No external key streaming is used.
+- The online phase operates entirely on the preloaded FSS RAM buffer.
+- no per-chunk key file reading occurs;
+- evaluator accesses key material through memory offsets.
 
-```text
+Current timing classification:
+
+```
+KEY_PRELOAD:
+
+included_in_online_wall = 0
+
+included_in_setup_wall = 1
+```
+
+------
+
+## 8.3 Setup
+
+```
 SETUP_TOTAL
 ```
 
-currently contains Evaluator startup work such as:
+contains evaluator initialization before online computation.
 
-```text
+The setup phase includes:
+
+```
 process startup
+
 CUDA/backend initialization
-key preload
-peer connection
+
+FSS key preload
+
+MPC peer connection
+
 READY synchronization
 ```
 
----
+The setup phase completes before the online computation begins.
 
-## 9.4 Online compute
+------
 
-```text
+## 8.4 Online computation
+
+```
 ONLINE_COMPUTE
 ```
 
-contains:
+represents the actual inference execution after setup completion.
 
-```text
-public Protein Gated-CNN
+It includes:
+
+```
+Public Protein Gated-CNN
         +
-secure adjacency normalization
+Secure adjacency normalization
         +
-two-party affinity MPC
+Two-party GPU-MPC inference
+        +
+Affinity prediction
 ```
 
----
+The online computation excludes:
 
-## 9.5 End-to-end
+```
+Offline Dealer key generation
 
-Current:
+Offline key distribution
 
-```text
+Dataset preparation
+```
+
+------
+
+## 8.5 End-to-end runtime
+
+```
 END_TO_END
 ```
 
-means:
+represents:
 
-```text
+```
 Evaluator setup
-    +
-online computation
+
++
+
+Online computation
 ```
 
-while input preprocessing and Dealer generation remain separately reported.
+The current reported scope is:
 
----
-
-## 9.6 Compliance note
-
-The timing records describe what the current implementation measures; they do not independently redefine the competition timing boundary.
-
-Model-specific FSS preprocessing may require additional organizer clarification.
-
-For this reason the current code reports:
-
-```text
-status=PRE_COMPLIANCE
+```
+END_TO_END =
+SETUP_TOTAL + ONLINE_COMPUTE
 ```
 
-rather than claiming final timing compliance.
+The following stages are reported separately:
 
----
+```
+Dataset preparation
 
-# 10. Correctness and Performance
+Offline Dealer
 
-## 10.1 Functional regression
-
-The current `BW=64, SCALE=12` KIBA smoke test produced:
-
-```text
-AFFINITY_GLOBAL[0]=10.361816
-AFFINITY_GLOBAL[1]=11.346680
-AFFINITY_GLOBAL[2]=11.227295
+Offline key distribution
 ```
 
-with:
+to maintain clear offline/online separation.
 
-```text
-PASS
-OFFLINE/ONLINE SEPARATION: PASS
-```
+------
 
-The direct full-RAM implementation has also been validated across multiple B8 chunks.
+## 8.6 Timing compliance note
 
-A logical:
-
-```text
-N = 17
-B = 8
-```
-
-test successfully executed three internal chunks.
-
----
-
-## 10.2 Current smoke-test timing
-
-The latest validated `N=3, B=8` local functional timing is reported in
-Section 8.6.
-
-The timing values are intentionally not duplicated here so that this section
-does not retain stale measurements after lifecycle or implementation changes.
-
-The `N=3` run is a functional smoke test, **not a representative throughput
-benchmark**. Five of the eight internal B8 positions are padding, and
-Python/PyTorch/CUDA process-startup overhead is significant at this size.
-
-Final performance measurements should use substantially larger logical sample
-counts after micro-batch and startup-overhead tuning.
-
----
-
-## 10.3 Accuracy
-
-The MPC program must output a **continuous affinity regression value** for each
-drug-target pair.
-
-The competition accuracy metric is the average of sensitivity and specificity:
-
-```text
-BalancedAccuracy = (Sensitivity + Specificity) / 2
-```
-
-For a threshold `t`, the current evaluation convention is:
-
-```text
-truth_class = (ground_truth_affinity >= t)
-ref_class   = (reference_prediction >= t)
-mpc_class   = (mpc_prediction >= t)
-```
-
-The reference and MPC predictions are evaluated against the same ground-truth
-classes:
-
-```text
-BA_ref = (sensitivity_ref + specificity_ref) / 2
-BA_mpc = (sensitivity_mpc + specificity_mpc) / 2
-```
-
-The qualification requirement is interpreted as:
-
-```text
-BA_ref - BA_mpc <= 0.02
-```
-
-that is, the MPC implementation should be no more than **2 percentage points**
-below the reference model on the test data.
-
-The implementation should not be tuned to a single affinity threshold. The
-competition FAQ states that the organizers expect regression outputs and may
-evaluate accuracy at several reasonable thresholds.
-
-Therefore:
-
-- continuous affinity values must be preserved as the submitted output;
-- a simple relative regression error such as `|mpc-ref| / |ref| < 2%` is **not**
-  the competition accuracy criterion;
-- MAE/max-error measurements are useful engineering diagnostics, but they do
-  not replace the competition accuracy gate.
-
----
-
-# 11. Resource Requirements and Limitations
-
-## 11.1 Current FSS key size
-
-For:
-
-```text
-BW = 64
-SCALE = 12
-B = 8
-secure online adjacency normalization
-```
-
-one FSS key chunk currently occupies approximately:
-
-```text
-2,954,940,416 bytes
-```
-
-per party.
-
-For B8:
-
-```text
-chunks = ceil(N / 8)
-```
-
-so:
-
-```text
-key bytes / party
-≈ ceil(N / 8) × 2,954,940,416
-```
+The current timing output reports all major lifecycle stages explicitly.
 
 Example:
 
-| Logical N | Chunks | Approx. key / party |
-|---:|---:|---:|
-| 8 | 1 | 2.95 GB |
-| 16 | 2 | 5.91 GB |
-| 128 | 16 | 47.28 GB |
-| 512 | 64 | 189.12 GB |
+```
+[DDG_TIME][OFFLINE_DEALER]
 
-These values are per online server.
+[DDG_TIME][KEY_PRELOAD]
+
+[DDG_TIME][SETUP_TOTAL]
+
+[DDG_TIME][ONLINE_COMPUTE]
+
+[DDG_TIME][END_TO_END]
+```
+
+The final competition timing boundary depends on the official evaluation
+ procedure defined by the organizers.
+
+Therefore, this repository reports measured components separately and does not
+ assume any specific treatment of offline cryptographic preprocessing.
+
+Detailed validation measurements are provided in:
+
+```
+docs/VALIDATION_RESULTS.md
+```
 
 ---
 
-## 11.2 Full-RAM mode
+# 9. Correctness and Performance
+
+## 9.1 Functional regression
+
+The implementation has been validated with:
+
+```
+BW     = 64
+SCALE  = 12
+```
+
+and two-party GPU-MPC execution using direct full-RAM FSS key evaluation.
+
+The validation covers:
+
+- correct continuous affinity prediction output;
+- offline/online lifecycle separation;
+- fixed micro-batch execution;
+- multi-chunk inference;
+- padding and output trimming correctness.
+
+Detailed validation cases and measured outputs are recorded in:
+
+```
+docs/VALIDATION_RESULTS.md
+```
+
+------
+
+## 9.2 Performance evaluation
+
+Performance depends on:
+
+- logical sample count `N`;
+- internal micro-batch size `B`;
+- GPU hardware;
+- FSS key configuration;
+- online/offline timing scope.
+
+The implementation reports:
+
+```
+Offline Dealer time
+Key preload time
+Evaluator setup time
+Protein inference time
+Online MPC computation time
+End-to-end runtime
+```
+
+Detailed benchmark results are maintained separately:
+
+```
+docs/VALIDATION_RESULTS.md
+```
+
+The current performance results are engineering validation measurements.
+ They are intended to verify correctness, lifecycle behavior, and runtime
+ characteristics of the implementation.
+
+Final competition performance depends on the official evaluation environment,
+ hardware configuration, and organizer-defined timing boundary.
+
+------
+
+## 9.3 Accuracy
+
+The MPC program outputs a continuous affinity regression value for each
+ drug-target pair.
+
+The competition accuracy metric is the average of sensitivity and specificity:
+
+```
+BalancedAccuracy = (Sensitivity + Specificity) / 2
+```
+
+For threshold `t`:
+
+```
+truth_class = (ground_truth_affinity >= t)
+
+ref_class = (reference_prediction >= t)
+
+mpc_class = (mpc_prediction >= t)
+```
+
+The reference and MPC predictions are evaluated using the same ground-truth
+ classes:
+
+```
+BA_ref = (sensitivity_ref + specificity_ref) / 2
+
+BA_mpc = (sensitivity_mpc + specificity_mpc) / 2
+```
+
+The qualification requirement is:
+
+```
+BA_ref - BA_mpc <= 0.02
+```
+
+Therefore:
+
+- submitted outputs remain continuous affinity values;
+- relative regression error is not the competition accuracy criterion;
+- MAE and maximum prediction error are engineering diagnostics only.
+
+The final accuracy evaluation should be performed using the official hidden test dataset and evaluation procedure provided by the organizers.
+
+---
+
+# 10. Resource Requirements and Limitations
+
+## 10.1 Current execution environment requirements
+
+The current implementation is designed for GPU-enabled Linux environments.
+
+Validated development environment:
+
+```
+OS                  Ubuntu 22.04
+CUDA                12.8
+Compiler            GCC/G++ 11+
+GPU                 NVIDIA CUDA GPU
+Python              3.12
+```
+
+The submitted solution is expected to run inside the provided competition Docker environment.
+
+The detailed environment setup, build process, and dependency installation are documented separately:
+
+```
+ENVIRONMENT_SETUP.md
+```
+
+------
+
+## 10.2 GPU and memory requirements
+
+The current GPU-MPC implementation uses GPU acceleration for:
+
+```
+- FSS key generation
+- secure MPC computation backend
+- drug graph inference
+- public Protein Gated-CNN inference
+```
+
+A typical deployment requires:
+
+```
+Server P0:
+    NVIDIA GPU
+    private drug share0
+    FSS key K0
+
+Server P1:
+    NVIDIA GPU
+    private drug share1
+    FSS key K1
+    public protein checkpoint
+```
+
+The exact GPU memory requirement depends on:
+
+```
+- logical sample number N
+- micro-batch size B
+- FSS key configuration
+- CUDA runtime overhead
+- model execution path
+```
+
+------
+
+## 10.3 FSS key storage requirement
+
+The current implementation uses:
+
+```
+Evaluator key mode:
+    direct full-RAM preload
+```
+
+The complete party-specific FSS key file is loaded into the final evaluator
+ buffer before online computation.
+
+For the validated configuration:
+
+```
+BW              = 64
+SCALE           = 12
+micro-batch     = 8
+secure A_norm   = enabled
+```
+
+the key size is approximately:
+
+```
+K0:
+    2,954,940,416 bytes
+
+K1:
+    2,954,940,416 bytes
+```
+
+Total:
+
+```
+K0 + K1 ≈ 5.91 GB
+```
+
+For multiple internal micro-batch chunks:
+
+```
+chunks = ceil(N / B)
+```
+
+the generated key storage increases approximately linearly with the number of
+ chunks.
+
+Example:
+
+| Logical N | Micro-batch B | Chunks | Approx. key size / party |
+| --------- | ------------- | ------ | ------------------------ |
+| 8         | 8             | 1      | 2.95 GB                  |
+| 16        | 8             | 2      | 5.91 GB                  |
+| 64        | 8             | 8      | 23.64 GB                 |
+| 128       | 8             | 16     | 47.28 GB                 |
+
+Before generating offline keys, ensure the selected filesystem has sufficient
+ capacity.
+
+------
+
+## 10.4 Full-RAM evaluation mode limitations
+
+The current production path intentionally uses:
+
+```
+full-key-ram
+```
+
+The current implementation uses direct full-RAM FSS key loading.
+
+The online Evaluator does not perform external key streaming during MPC execution.
 
 Advantages:
 
-```text
-no online per-chunk SSD key reads
-no second complete RAM copy
-simple persistent Evaluator
-key_read_us = 0 during chunk MPC
+- no external key loading overhead during online MPC computation;
+- simpler evaluator lifecycle;
+- deterministic key access through memory offsets;
+- lower implementation complexity.
+
+Limitations:
+
+- the complete key file must fit into available memory;
+- memory usage increases with the number of FSS chunks;
+Very large datasets require sufficient storage and memory capacity because complete FSS key material is loaded before online computation.
+
+The current implementation targets competition-scale evaluation rather than
+ Dataset size is currently limited by available storage and memory resources.
+
+------
+
+## 10.5 Dataset and model replacement limitations
+
+The submitted solution supports replacing:
+
+```
+Dataset:
+    CSV input
+    ↓
+reference/prepare_dataset.py
+    ↓
+prepared MPC input directory
+
+Model:
+    DeepDTAGen compatible checkpoint
+    ↓
+reference/prepare_model.py
+    ↓
+weights.bin
 ```
 
-Limitation:
+The replacement dataset must provide:
 
-```text
-host RAM consumption grows linearly with padded chunk count
+```
+compound_iso_smiles
+target_sequence
+(optional) affinity
 ```
 
-Before running a large logical batch, leave sufficient memory for:
+The replacement model checkpoint must preserve the expected DeepDTAGen
+ architecture.
 
-```text
-OS
-CUDA/runtime
-network buffers
-input data
-temporary host allocations
-filesystem/page cache
+A checkpoint with different layer dimensions or network structure requires
+ additional model conversion and MPC implementation changes.
+
+------
+
+## 10.6 Current validation scope
+
+The current implementation has been validated for:
+
+```
+- local two-party GPU execution
+- offline Dealer generation
+- direct full-RAM key loading
+- fixed micro-batch execution
+- multi-chunk inference
+- continuous affinity output
+```
+
+Additional validation required before final competition execution:
+
+```
+- final Docker submission environment
+- official hidden evaluation dataset
+- final competition timing measurement
+- physical two-server network deployment
 ```
 
 ---
 
-## 11.3 Large datasets
-
-The currently validated production path uses complete offline FSS key files
-and preloads the complete per-party key stream into host RAM before online MPC
-execution.
-
-Therefore the complete per-party key file must fit in available host memory,
-with additional memory reserved for the OS, CUDA/runtime state, input data,
-network buffers, temporary allocations, and filesystem/page cache.
-
-Memory-bounded SSD/key streaming is **not part of the currently validated
-production workflow**.
-
-For logical datasets whose complete FSS key stream does not fit safely in host
-RAM, an additional memory-bounded key-consumption strategy would be required
-and must be validated separately before it is presented as a supported
-production mode.
-
----
-
-## 11.4 Remaining performance work
-
-Current major performance work includes:
-
-```text
-1. reduce public Protein worker startup overhead
-2. remove unnecessary Evaluator startup delay
-3. tune MPC micro-batch B
-4. benchmark larger N
-5. validate on two physical servers
-6. benchmark on final target GPU/network environment
-```
-
----
-
-## 11.5 Cryptographic randomness
-
-Production input secret sharing uses cryptographically appropriate OS randomness.
-
-Before final submission, the Dealer/FSS randomness configuration must also be audited for the competition's required security level.
-
-Fixed deterministic seeds must remain debug/regression-only.
-
----
-
-# 12. Contact
+# 11. Contact
 
 **Team:** `<TEAM_NAME>`
-
-**Institution:** `<INSTITUTION>`
-
-**Contact:** `<CONTACT_NAME>`
 
 **Email:** `<CONTACT_EMAIL>`
 
@@ -2727,36 +2484,151 @@ Fixed deterministic seeds must remain debug/regression-only.
 
 # Appendix: Final Validation Checklist
 
-Before final submission:
+This checklist summarizes the validation items required before submitting the
+ final Track 3 solution.
 
-```text
-[ ] Fresh environment builds successfully
-[ ] CUDA/PyTorch GPU execution works
+------
 
-[ ] Replacement CSV can be prepared
-[ ] Replacement compatible .pth can be prepared
+## Environment
 
-[ ] Drug is secret-shared
-[ ] Protein remains public
-[ ] A_norm is computed securely online
+-  Competition Docker environment can be entered successfully.
+-  CUDA-enabled GPU environment is available.
+-  Required Python dependencies are installed.
+-  CUDA backend and MPC components can be compiled successfully.
 
-[ ] Dealer generates K0/K1 before online execution
-[ ] Dealer exits before online MPC
-[ ] P0 receives only share0 + K0
-[ ] P1 receives only share1 + K1
+Detailed environment instructions:
 
-[ ] Full-RAM path reports key_read_us=0
-[ ] READY occurs before START
-[ ] START occurs before MPC chunks
-
-[ ] N=1 smoke test passes
-[ ] multi-chunk regression passes
-[ ] large-N benchmark passes
-
-[ ] two physical server execution passes
-[ ] accuracy gate passes
-[ ] final timing interpretation is confirmed
-[ ] cryptographic randomness audit passes
-
-[ ] README contains final contact email
 ```
+ENVIRONMENT_SETUP.md
+```
+
+------
+
+## Dataset preparation
+
+-  External CSV dataset format is supported.
+-  Drug SMILES and protein sequence columns are correctly parsed.
+-  Private drug features are converted into additive secret shares.
+-  Raw adjacency with self-loops is generated.
+-  Public protein sequence is converted into `target_ids.dat`.
+
+Validation command:
+
+```
+python3 reference/prepare_dataset.py --help
+```
+
+------
+
+## Model preparation
+
+-  DeepDTAGen checkpoint conversion is supported.
+-  MPC-compatible `weights.bin` can be generated.
+-  Public Protein Gated-CNN checkpoint remains available.
+
+Validation command:
+
+```
+python3 reference/prepare_model.py --help
+```
+
+------
+
+## Offline Dealer
+
+-  Offline Dealer generates party-specific FSS keys.
+-  Dealer generates keys independently from online inference.
+-  Generated keys can be loaded by online Evaluators.
+-  Key distribution follows:
+
+```
+K0 → Server P0
+
+K1 → Server P1
+```
+
+Validation command:
+
+```
+python3 gpu_mpc/run_offline_dealer.py --help
+```
+
+------
+
+## Online two-party inference
+
+-  Local two-party GPU inference is validated.
+-  Direct full-RAM FSS key evaluation is validated.
+-  Fixed micro-batch execution is validated.
+-  Multi-chunk inference is validated.
+-  Padding samples are correctly removed from final outputs.
+
+Local validation entry:
+
+```
+python3 gpu_mpc/run_offline_online_local.py --help
+```
+
+Two-server deployment entry:
+
+```
+python3 gpu_mpc/run_offline_online_party.py --help
+```
+
+------
+
+## Correctness
+
+-  Continuous affinity prediction values are produced.
+-  Output count matches logical input sample count.
+-  Offline and online phases are separated.
+-  Secret-shared drug input remains distributed between two parties.
+
+Detailed validation records:
+
+```
+docs/VALIDATION_RESULTS.md
+```
+
+------
+
+## Performance measurement
+
+-  Offline Dealer runtime is reported separately.
+-  Key preload time is reported separately.
+-  Setup runtime is reported separately.
+-  Online computation runtime is reported separately.
+-  End-to-end runtime is reported separately.
+
+Benchmark tables:
+
+```
+docs/VALIDATION_RESULTS.md
+```
+
+------
+
+## Final submission check
+
+Before submission:
+
+-  Rebuild inside the final Docker image.
+-  Run the complete pipeline from a clean environment.
+-  Replace demonstration dataset with official evaluation dataset.
+-  Prepare required model weights.
+-  Verify generated output format.
+-  Confirm contact information in submission documents.
+
+Submission description:
+
+```
+TRACK3_SUBMISSION.md
+```
+
+------
+
+This checklist only records the final validated workflow.
+Historical development notes and intermediate experiments are archived under:
+docs/archive/
+
+ separately and are not part of the submission path.
